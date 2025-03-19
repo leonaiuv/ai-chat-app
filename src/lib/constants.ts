@@ -18,4 +18,5 @@ export const LOCAL_STORAGE_KEYS = {
   API_KEY: "deepseek-api-key",
   SELECTED_MODEL: "deepseek-selected-model",
   CONVERSATIONS: "deepseek-conversations",
+  NOTES: "notes"
 }; 
