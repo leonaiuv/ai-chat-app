@@ -1988,7 +1988,7 @@ export default function Home() {
                   应用信息
                 </p>
                 <p className="text-xs text-gray-600 dark:text-gray-400">
-                  版本: 1.0.0
+                  版本: 0.0.7
                 </p>
                 <p className="text-xs text-gray-600 dark:text-gray-400">
                   如有问题请联系开发者
