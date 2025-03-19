@@ -76,8 +76,35 @@
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
   --foreground-rgb: 0, 0, 0;
-  --background-start-rgb: 214, 219, 220;
+  --background-start-rgb: 245, 247, 250;
   --background-end-rgb: 255, 255, 255;
+  
+  /* 品牌主色 */
+  --primary-color: 59, 130, 246;
+  --primary-light: 96, 165, 250;
+  --primary-dark: 37, 99, 235;
+  
+  /* 强调色 */
+  --accent-color: 139, 92, 246;
+  --secondary-color: 14, 165, 233;
+  --warning-color: 245, 158, 11;
+  --error-color: 239, 68, 68;
+  --success-color: 34, 197, 94;
+  
+  /* 消息气泡颜色 */
+  --bubble-user: var(--primary-color);
+  --bubble-assistant: 229, 231, 235;
+  --bubble-reasoning: 254, 252, 232;
+  
+  /* 阴影 */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.07);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+  
+  /* 动画时间 */
+  --transition-fast: 150ms;
+  --transition-normal: 250ms;
+  --transition-slow: 350ms;
 }
 
 .dark {
@@ -130,9 +157,499 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --foreground-rgb: 255, 255, 255;
-    --background-start-rgb: 0, 0, 0;
-    --background-end-rgb: 0, 0, 0;
+    --background-start-rgb: 17, 24, 39;
+    --background-end-rgb: 30, 41, 59;
+    
+    /* 暗色模式下的品牌色调整 */
+    --primary-light: 96, 165, 250;
+    --primary-dark: 37, 99, 235;
+    
+    /* 暗色模式下的消息气泡 */
+    --bubble-user: var(--primary-color);
+    --bubble-assistant: 55, 65, 81;
+    --bubble-reasoning: 41, 37, 36;
   }
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: linear-gradient(
+      to bottom,
+      rgb(var(--background-start-rgb)),
+      rgb(var(--background-end-rgb))
+    )
+    fixed;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 基础过渡效果 */
+.transition-all {
+  transition-property: all;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: var(--transition-normal);
+}
+
+.transition-transform {
+  transition-property: transform;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: var(--transition-normal);
+}
+
+.transition-opacity {
+  transition-property: opacity;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: var(--transition-normal);
+}
+
+/* 气泡消息增强 */
+.message-bubble {
+  position: relative;
+  border-radius: 1rem;
+  padding: 0.75rem 1rem;
+  max-width: 85%;
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+  transform-origin: bottom;
+  animation: message-pop-in 0.3s ease-out forwards;
+}
+
+.message-bubble.user {
+  background-color: rgb(var(--bubble-user));
+  color: white;
+  border-bottom-right-radius: 0.25rem;
+}
+
+.message-bubble.assistant {
+  background-color: rgb(var(--bubble-assistant));
+  color: rgb(55, 65, 81);
+  border-bottom-left-radius: 0.25rem;
+}
+
+.dark .message-bubble.assistant {
+  background-color: rgb(55, 65, 81);
+  color: rgb(229, 231, 235);
+}
+
+.message-bubble.reasoning {
+  background-color: rgb(var(--bubble-reasoning));
+  border-bottom-left-radius: 0.25rem;
+}
+
+/* 消息进入动画 */
+@keyframes message-pop-in {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* 消息容器和输入区增强 */
+.message-container-wrapper {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.message-inner-container {
+  width: 100%;
+  max-width: 768px; /* 控制最大宽度 */
+  transition: all var(--transition-normal);
+  margin: 0 auto;
+}
+
+/* 调整消息气泡在大屏幕上的最大宽度 */
+@media (min-width: 1280px) {
+  .message-bubble {
+    max-width: 70%; /* 在大屏幕上降低气泡最大宽度比例 */
+  }
+}
+
+@media (min-width: 1536px) {
+  .message-bubble {
+    max-width: 60%; /* 在超大屏幕上进一步降低气泡宽度比例 */
+  }
+}
+
+/* 输入区域背景增强 */
+.input-area {
+  border-top: 1px solid rgba(229, 231, 235, 0.8);
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(8px);
+  transition: all var(--transition-normal);
+}
+
+.dark .input-area {
+  border-top: 1px solid rgba(55, 65, 81, 0.8);
+  background: rgba(31, 41, 55, 0.8);
+}
+
+/* 输入框容器增强 */
+.input-container {
+  width: 100%;
+  max-width: 768px;
+  margin: 0 auto;
+  transition: all var(--transition-normal);
+  background-color: white;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+}
+
+.dark .input-container {
+  background-color: rgb(55, 65, 81);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+/* 强化输入框样式 */
+.enhanced-input {
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 0.5rem;
+  font-size: 1rem;
+  line-height: 1.5;
+  padding: 0.625rem 1rem;
+  height: 46px;
+}
+
+.enhanced-input:focus {
+  border-color: rgba(var(--primary-color), 0.5);
+  box-shadow: 0 0 0 3px rgba(var(--primary-color), 0.25);
+  outline: none;
+}
+
+.dark .enhanced-input {
+  border-color: rgba(255, 255, 255, 0.1);
+  background-color: rgba(55, 65, 81, 0.9);
+  color: white;
+}
+
+.dark .enhanced-input:focus {
+  border-color: rgba(var(--primary-color), 0.5);
+  box-shadow: 0 0 0 3px rgba(var(--primary-color), 0.25);
+}
+
+/* 增强按钮样式 */
+.enhanced-button {
+  position: relative;
+  overflow: hidden;
+  transition: all var(--transition-fast);
+  transform: translateY(0);
+  height: 46px;
+  width: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.5rem;
+}
+
+.enhanced-button:after {
+  content: "";
+  display: block;
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  background-image: radial-gradient(circle, #fff 10%, transparent 10.01%);
+  background-repeat: no-repeat;
+  background-position: 50%;
+  transform: scale(10, 10);
+  opacity: 0;
+  transition: transform 0.6s, opacity 0.6s;
+}
+
+.enhanced-button:active {
+  transform: translateY(1px);
+}
+
+.enhanced-button:active:after {
+  transform: scale(0, 0);
+  opacity: 0.3;
+  transition: 0s;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: rgba(156, 163, 175, 0.5);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(156, 163, 175, 0.7);
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background-color: rgba(156, 163, 175, 0.3);
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(156, 163, 175, 0.5);
+}
+
+/* 加载指示器 */
+.loading-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.loading-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background-color: currentColor;
+  opacity: 0.6;
+}
+
+.loading-dot:nth-child(1) {
+  animation: pulse 1.5s infinite;
+}
+
+.loading-dot:nth-child(2) {
+  animation: pulse 1.5s infinite 0.3s;
+}
+
+.loading-dot:nth-child(3) {
+  animation: pulse 1.5s infinite 0.6s;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+}
+
+/* 主题切换动画 */
+.theme-transition {
+  transition: background-color var(--transition-slow), 
+              border-color var(--transition-slow),
+              color var(--transition-slow);
+}
+
+/* 思考过程容器增强 */
+.reasoning-container {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  line-height: 1.5;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  background-color: rgba(254, 252, 232, 0.7);
+  border: 1px solid rgba(234, 179, 8, 0.2);
+  max-height: 36rem;
+  overflow-y: auto;
+  transition: max-height var(--transition-normal);
+}
+
+.dark .reasoning-container {
+  background-color: rgba(41, 37, 36, 0.7);
+  border-color: rgba(234, 179, 8, 0.3);
+}
+
+.reasoning-container::-webkit-scrollbar {
+  width: 6px;
+}
+
+.reasoning-container::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.reasoning-container::-webkit-scrollbar-thumb {
+  background-color: rgba(234, 179, 8, 0.3);
+  border-radius: 9999px;
+}
+
+.reasoning-container::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(234, 179, 8, 0.5);
+}
+
+.reasoning-expanded {
+  max-height: 500px !important;
+}
+
+.reasoning-container.collapsed {
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-width: 0;
+  overflow: hidden;
+}
+
+/* 提示词按钮效果 */
+.suggestion-button {
+  transition: all var(--transition-fast);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+  position: relative;
+}
+
+.dark .suggestion-button {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.suggestion-button:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.suggestion-button:active {
+  transform: translateY(0);
+}
+
+/* 浮动工具按钮 */
+.floating-button {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  border-radius: 9999px;
+  padding: 0.75rem;
+  background-color: rgb(var(--primary-color));
+  color: white;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--transition-normal);
+  z-index: 50;
+}
+
+.floating-button:hover {
+  transform: translateY(-3px) scale(1.05);
+  box-shadow: 0 15px 20px rgba(0, 0, 0, 0.15);
+}
+
+.floating-button:active {
+  transform: translateY(0) scale(0.95);
+}
+
+/* 页面切换动画 */
+.page-transition-enter {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+.page-transition-enter-active {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 300ms, transform 300ms;
+}
+
+.page-transition-exit {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.page-transition-exit-active {
+  opacity: 0;
+  transform: translateY(-10px);
+  transition: opacity 300ms, transform 300ms;
+}
+
+/* 设置面板美化 */
+.settings-panel {
+  background-color: white;
+  border-radius: 1rem;
+  box-shadow: var(--shadow-lg);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  animation: panel-slide-in 0.3s ease-out forwards;
+}
+
+.dark .settings-panel {
+  background-color: rgb(31, 41, 55);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+@keyframes panel-slide-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-20px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* 模型下拉菜单美化 */
+.model-selector {
+  position: relative;
+}
+
+.model-option {
+  transition: all var(--transition-fast);
+  cursor: pointer;
+}
+
+.model-option:hover {
+  background-color: rgba(var(--primary-color), 0.1);
+}
+
+.model-option.selected {
+  background-color: rgba(var(--primary-color), 0.2);
+}
+
+/* 卡片和面板通用样式 */
+.card {
+  border-radius: 1rem;
+  background-color: white;
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  transition: transform var(--transition-normal), box-shadow var(--transition-normal);
+}
+
+.dark .card {
+  background-color: rgb(31, 41, 55);
+}
+
+.card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-lg);
+}
+
+/* 侧边栏美化 */
+.sidebar-item {
+  transition: all var(--transition-fast);
+  border-radius: 0.5rem;
+  margin: 0.25rem 0;
+}
+
+.sidebar-item:hover {
+  background-color: rgba(var(--primary-color), 0.1);
+}
+
+.sidebar-item.active {
+  background-color: rgba(var(--primary-color), 0.2);
+  font-weight: 500;
+}
+
+.dark .sidebar-item:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.dark .sidebar-item.active {
+  background-color: rgba(255, 255, 255, 0.15);
 }
 
 @keyframes fadeIn {
