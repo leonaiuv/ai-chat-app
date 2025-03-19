@@ -3,7 +3,7 @@ import { DEEPSEEK_API_URL } from '@/lib/constants';
 import { v4 as uuidv4 } from 'uuid'; // 需要安装: npm install uuid @types/uuid
 
 // 设置最大运行时间为300秒
-export const maxDuration = 300; 
+export const maxDuration = 500; 
 
 // 定义日志级别
 enum LogLevel {

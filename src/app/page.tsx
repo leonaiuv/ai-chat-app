@@ -2,10 +2,28 @@
 
 import { useState, useRef, useEffect } from "react";
 import Image from "next/image";
-import { Send, Trash2, Settings, Menu, X, Moon, Sun, Plus, History, Download, Pencil, ChevronRight, ChevronDown, Book, FilePlus, Tag, Search } from "lucide-react";
+import { Send, Trash2, Settings, Menu, X, Moon, Sun, Plus, History, Download, Pencil, ChevronRight, ChevronDown, Book, FilePlus, Tag, Search, MessageSquare } from "lucide-react";
 import { useTheme } from "next-themes";
 import { MODELS, LOCAL_STORAGE_KEYS } from "@/lib/constants";
 import { v4 as uuidv4 } from 'uuid';
+// 导入Markdown相关依赖
+import ReactMarkdown from 'react-markdown';
+// @ts-ignore
+import rehypeSanitize from 'rehype-sanitize';
+// 移除rehype-highlight
+// @ts-ignore
+import remarkGfm from 'remark-gfm';
+
+// 定义注释接口
+interface Annotation {
+  id: string;
+  text: string; // 被选中的文本
+  startIndex: number; // 在note内容中的起始位置
+  endIndex: number; // 在note内容中的结束位置
+  query: string; // 用户的问题
+  explanation: string; // AI生成的解释
+  createdAt: Date;
+}
 
 interface Message {
   id: string;
@@ -32,6 +50,7 @@ interface Note {
   updatedAt: Date;
   conversationId?: string;
   messageIds?: string[];
+  annotations?: Annotation[]; // 新增: 注释数组
 }
 
 // 定义前端日志记录函数
@@ -91,6 +110,18 @@ export default function Home() {
   const [noteTags, setNoteTags] = useState<string[]>([]);
   const [isEditingNote, setIsEditingNote] = useState(false);
   const [newTag, setNewTag] = useState("");
+  
+  // 注释相关状态
+  const [selectedText, setSelectedText] = useState("");
+  const [selectionRange, setSelectionRange] = useState<{start: number, end: number} | null>(null);
+  const [showAnnotationPrompt, setShowAnnotationPrompt] = useState(false);
+  const [annotationPromptPosition, setAnnotationPromptPosition] = useState({ x: 0, y: 0 });
+  const [annotationQuery, setAnnotationQuery] = useState("");
+  const [generatedExplanation, setGeneratedExplanation] = useState("");
+  const [isGeneratingExplanation, setIsGeneratingExplanation] = useState(false);
+  const [showAnnotationPopup, setShowAnnotationPopup] = useState(false);
+  const [selectedAnnotation, setSelectedAnnotation] = useState<Annotation | null>(null);
+  const [annotationPopupPosition, setAnnotationPopupPosition] = useState({ x: 0, y: 0 });
 
   // 示例问题建议
   const modelSuggestions: string[] = [
@@ -425,314 +456,225 @@ export default function Home() {
                 }
                 break;
               }
+              
+              // 提取纯JSON内容部分，去除SSE前缀
+              const jsonContent = data.trim();
+              
               try {
-                // 在解析JSON前记录错误的数据格式
-                try {
-                  const parsed = JSON.parse(data);
-                  
-                  if (parsed.choices && parsed.choices[0].delta) {
-                    // 处理思维链内容
-                    if (parsed.choices[0].delta.reasoning_content) {
-                      // 如果是思维链内容
-                      const reasoningContent = parsed.choices[0].delta.reasoning_content;
+                // 调试日志
+                console.log("处理SSE数据:", jsonContent.substring(0, 50) + (jsonContent.length > 50 ? '...' : ''));
+                
+                // 解析JSON
+                const parsed = JSON.parse(jsonContent);
+                
+                if (parsed.choices && parsed.choices[0].delta) {
+                  // 处理思维链内容
+                  if (parsed.choices[0].delta.reasoning_content) {
+                    // 如果是思维链内容
+                    const reasoningContent = parsed.choices[0].delta.reasoning_content;
+                    
+                    // 如果当前阶段不是reasoning，则创建新的思维链消息
+                    if (currentPhase !== "reasoning") {
+                      currentPhase = "reasoning";
+                      reasoningResponse = reasoningContent;
+                      // 添加更多随机性，确保ID唯一
+                      reasoningMessageId = `reasoning-${Date.now().toString()}-${Math.random().toString(36).substring(2, 10)}`;
                       
-                      // 如果当前阶段不是reasoning，则创建新的思维链消息
-                      if (currentPhase !== "reasoning") {
-                        currentPhase = "reasoning";
-                        reasoningResponse = reasoningContent;
-                        // 添加更多随机性，确保ID唯一
-                        reasoningMessageId = `reasoning-${Date.now().toString()}-${Math.random().toString(36).substring(2, 10)}`;
+                      // 创建新的思维链消息 - 更新对应的会话
+                      setConversations(prev => {
+                        const updatedConversations = [...prev];
+                        const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
                         
-                        // 创建新的思维链消息 - 更新对应的会话
-                        setConversations(prev => {
-                          const updatedConversations = [...prev];
-                          const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+                        if (targetConversation) {
+                          // 如果找到目标会话，更新它的消息
+                          const updatedMessages = [...targetConversation.messages, {
+                            id: reasoningMessageId,
+                            content: `思考过程：${reasoningContent}`,
+                            role: "assistant" as const,
+                            timestamp: new Date(),
+                            type: "reasoning" as const
+                          }];
                           
-                          if (targetConversation) {
-                            // 如果找到目标会话，更新它的消息
-                            const updatedMessages = [...targetConversation.messages, {
-                              id: reasoningMessageId,
-                              content: `思考过程：${reasoningContent}`,
-                              role: "assistant" as const,
-                              timestamp: new Date(),
-                              type: "reasoning" as const
-                            }];
-                            
-                            targetConversation.messages = updatedMessages;
-                          }
-                          
-                          return updatedConversations;
-                        });
-                        
-                        // 如果当前正在查看相同的会话，也更新当前显示的消息
-                        if (currentConversationId === activeConversationId) {
-                          console.log(`更新思维链消息到UI, currentConversationId: ${currentConversationId}, activeConversationId: ${activeConversationId}`);
-                          setMessages(prev => {
-                            // 检查是否已经存在相同ID的消息
-                            if (!prev.some(msg => msg.id === reasoningMessageId)) {
-                              console.log(`添加新思维链消息: ${reasoningMessageId}`);
-                              return [
-                                ...prev,
-                                {
-                                  id: reasoningMessageId,
-                                  content: `思考过程：${reasoningContent}`,
-                                  role: "assistant" as const,
-                                  timestamp: new Date(),
-                                  type: "reasoning"
-                                }
-                              ];
-                            }
-                            console.warn(`在当前消息列表中思维链消息ID重复: ${reasoningMessageId}`);
-                            return prev;
-                          });
-                          
-                          // 确保在添加新消息后立即滚动到底部
-                          requestAnimationFrame(() => scrollToBottom());
+                          targetConversation.messages = updatedMessages;
                         }
-                      } else {
-                        // 已经有思维链消息，更新它
-                        reasoningResponse += reasoningContent;
                         
-                        // 更新会话中的消息
-                        setConversations(prev => {
-                          const updatedConversations = [...prev];
-                          const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
-                          
-                          if (targetConversation) {
-                            // 如果找到目标会话，更新对应的消息
-                            targetConversation.messages = targetConversation.messages.map(msg => {
-                              if (msg.id === reasoningMessageId) {
-                                return {
-                                  ...msg,
-                                  content: `思考过程：${reasoningResponse}`
-                                };
-                              }
-                              return msg;
-                            });
-                          }
-                          
-                          return updatedConversations;
-                        });
-                        
-                        // 如果当前正在查看相同的会话，也更新当前显示的消息
-                        if (currentConversationId === activeConversationId) {
-                          console.log(`更新思维链内容, currentConversationId: ${currentConversationId}, activeConversationId: ${activeConversationId}`);
-                          setMessages(prev => {
-                            const updatedMessages = prev.map(msg => {
-                              if (msg.id === reasoningMessageId) {
-                                return {
-                                  ...msg,
-                                  content: `思考过程：${reasoningResponse}`
-                                };
-                              }
-                              return msg;
-                            });
-                            return updatedMessages;
-                          });
-                          // 在内容更新后立即滚动到底部
-                          requestAnimationFrame(() => scrollToBottom());
-                        }
-                      }
-                    } 
-                    // 处理普通回复内容
-                    else if (parsed.choices[0].delta.content) {
-                      const content = parsed.choices[0].delta.content;
-                      
-                      // 如果当前阶段不是answer，则创建新的回答消息
-                      if (currentPhase !== "answer") {
-                        currentPhase = "answer";
-                        aiResponse = content;
-                        // 添加更多随机性，确保ID唯一
-                        aiMessageId = `answer-${Date.now().toString()}-${Math.random().toString(36).substring(2, 10)}`;
-                        
-                        // 创建新的回答消息 - 更新对应的会话
-                        setConversations(prev => {
-                          const updatedConversations = [...prev];
-                          const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
-                          
-                          if (targetConversation) {
-                            // 如果找到目标会话，更新它的消息
-                            const updatedMessages = [...targetConversation.messages, {
-                              id: aiMessageId,
-                              content: aiResponse,
-                              role: "assistant" as const,
-                              timestamp: new Date(),
-                              type: "answer" as const
-                            }];
-                            
-                            targetConversation.messages = updatedMessages;
-                          }
-                          
-                          return updatedConversations;
-                        });
-                        
-                        // 如果当前正在查看相同的会话，也更新当前显示的消息
-                        if (currentConversationId === activeConversationId) {
-                          console.log(`添加AI回复消息到UI, currentConversationId: ${currentConversationId}, activeConversationId: ${activeConversationId}`);
-                          setMessages(prev => {
-                            // 检查是否已经存在相同ID的消息
-                            if (!prev.some(msg => msg.id === aiMessageId)) {
-                              console.log(`添加新回复消息: ${aiMessageId}`);
-                              return [
-                                ...prev,
-                                {
-                                  id: aiMessageId,
-                                  content: aiResponse,
-                                  role: "assistant" as const,
-                                  timestamp: new Date(),
-                                  type: "answer" as const
-                                }
-                              ];
-                            }
-                            console.warn(`在当前消息列表中回答消息ID重复: ${aiMessageId}`);
-                            return prev;
-                          });
-                          
-                          // 确保在添加新消息后立即滚动到底部 
-                          requestAnimationFrame(() => scrollToBottom());
-                        }
-                      } else {
-                        // 已经有回答消息，更新它
-                        aiResponse += content;
-                        
-                        // 更新会话中的消息
-                        setConversations(prev => {
-                          const updatedConversations = [...prev];
-                          const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
-                          
-                          if (targetConversation) {
-                            // 如果找到目标会话，更新对应的消息
-                            targetConversation.messages = targetConversation.messages.map(msg => {
-                              if (msg.id === aiMessageId) {
-                                return {
-                                  ...msg,
-                                  content: aiResponse
-                                };
-                              }
-                              return msg;
-                            });
-                          }
-                          
-                          return updatedConversations;
-                        });
-                        
-                        // 如果当前正在查看相同的会话，也更新当前显示的消息
-                        if (currentConversationId === activeConversationId) {
-                          console.log(`更新AI回复内容, currentConversationId: ${currentConversationId}, activeConversationId: ${activeConversationId}`);
-                          setMessages(prev => {
-                            const updatedMessages = prev.map(msg => {
-                              if (msg.id === aiMessageId) {
-                                return {
-                                  ...msg,
-                                  content: aiResponse
-                                };
-                              }
-                              return msg;
-                            });
-                            return updatedMessages;
-                          });
-                          // 在内容更新后立即滚动到底部
-                          requestAnimationFrame(() => scrollToBottom());
-                        }
-                      }
-                    }
-                  } else if (parsed.error) {
-                    // 处理API返回的错误信息
-                    const errorDetails = parsed.error || '未知错误';
-                    
-                    // 输出详细错误信息到控制台
-                    console.error("API返回错误:", errorDetails);
-                    
-                    let errorMsg = typeof errorDetails === 'string' 
-                      ? errorDetails 
-                      : (errorDetails.message || '未知错误');
-                    
-                    // 创建错误消息
-                    const errorMessage: Message = {
-                      id: `error-${Date.now()}`,
-                      content: `处理请求时出错: ${errorMsg}`,
-                      role: "assistant",
-                      timestamp: new Date(),
-                      type: "answer"
-                    };
-                    
-                    // 更新对应的会话
-                    setConversations(prev => {
-                      const updatedConversations = [...prev];
-                      const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
-                      
-                      if (targetConversation) {
-                        // 更新会话的消息
-                        targetConversation.messages = [
-                          ...targetConversation.messages,
-                          errorMessage
-                        ];
-                      }
-                      
-                      return updatedConversations;
-                    });
-                    
-                    // 如果当前正在查看相同的会话，也更新当前显示的消息
-                    if (currentConversationId === activeConversationId) {
-                      setMessages(prev => {
-                        // 移除所有之前的错误消息
-                        const filtered = prev.filter(msg => !msg.id.includes('error-'));
-                        return [...filtered, errorMessage];
+                        return updatedConversations;
                       });
+                      
+                      // 如果当前正在查看相同的会话，也更新当前显示的消息
+                      if (currentConversationId === activeConversationId) {
+                        console.log(`更新思维链消息到UI, currentConversationId: ${currentConversationId}, activeConversationId: ${activeConversationId}`);
+                        setMessages(prev => {
+                          // 检查是否已经存在相同ID的消息
+                          if (!prev.some(msg => msg.id === reasoningMessageId)) {
+                            console.log(`添加新思维链消息: ${reasoningMessageId}`);
+                            return [
+                              ...prev,
+                              {
+                                id: reasoningMessageId,
+                                content: `思考过程：${reasoningContent}`,
+                                role: "assistant" as const,
+                                timestamp: new Date(),
+                                type: "reasoning" as const
+                              }
+                            ];
+                          }
+                          return prev;
+                        });
+                      } else {
+                        console.log(`不更新UI，因为当前查看的不是活跃会话, currentConversationId: ${currentConversationId}, activeConversationId: ${activeConversationId}`);
+                      }
+                    } else {
+                      // 如果已经是reasoning阶段，只更新内容
+                      reasoningResponse += reasoningContent;
+                      
+                      // 更新思维链消息 - 更新对应的会话
+                      setConversations(prev => {
+                        const updatedConversations = [...prev];
+                        const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+                        
+                        if (targetConversation) {
+                          // 如果找到目标会话，更新思维链消息
+                          const reasoningMessage = targetConversation.messages.find(msg => msg.id === reasoningMessageId);
+                          if (reasoningMessage) {
+                            reasoningMessage.content = `思考过程：${reasoningResponse}`;
+                          }
+                        }
+                        
+                        return updatedConversations;
+                      });
+                      
+                      // 如果当前正在查看相同的会话，也更新当前显示的消息
+                      if (currentConversationId === activeConversationId) {
+                        setMessages(prev => {
+                          return prev.map(msg => 
+                            msg.id === reasoningMessageId 
+                              ? { ...msg, content: `思考过程：${reasoningResponse}` }
+                              : msg
+                          );
+                        });
+                        
+                        // 自动滚动到当前推理内容底部
+                        scrollReasoningToBottom(reasoningMessageId);
+                      }
                     }
-                    
-                    // 清除加载状态
-                    setIsLoading(false);
-                    setIsRequestPending(false);
-                    setPendingConversationId(null);
                   }
-                } catch (parseError: Error | any) {
-                  // 详细记录解析错误和原始数据
-                  logClientMessage('ERROR', "JSON解析错误", {
-                    clientRequestId,
-                    serverRequestId: responseRequestId,
-                    errorMessage: parseError.message,
-                    rawData: data,
-                    position: parseError.message?.match?.(/position (\d+)/)?.[1] || 'unknown',
-                    dataLength: data.length
-                  });
-                  
-                  // 如果数据不是完整的JSON，尝试修复一些常见的问题
-                  let fixedData = data;
-                  // 尝试修复: 如果JSON字符串包含未转义的换行符
-                  fixedData = fixedData.replace(/([^\\])\n/g, '$1\\n');
-                  // 尝试修复: 如果JSON字符串包含未转义的引号
-                  fixedData = fixedData.replace(/([^\\])"/g, '$1\\"');
-                  // 尝试修复: 如果JSON字符串末尾缺少引号
-                  if (fixedData.match(/"[^"]*$/)) {
-                    fixedData += '"';
-                  }
-                  
-                  // 尝试再次解析修复后的数据
-                  try {
-                    const parsed = JSON.parse(fixedData);
-                    logClientMessage('WARN', "JSON数据已修复并成功解析", {
-                      clientRequestId,
-                      serverRequestId: responseRequestId
-                    });
+                  // 处理实际回复内容
+                  else if (parsed.choices[0].delta.content) {
+                    const content = parsed.choices[0].delta.content;
                     
-                    // 处理修复后的数据
-                    if (parsed.choices && parsed.choices[0].delta) {
-                      // 继续处理数据...
+                    // 如果当前阶段不是answer，则创建新的回复消息
+                    if (currentPhase !== "answer") {
+                      currentPhase = "answer";
+                      aiResponse = content;
+                      aiMessageId = `answer-${Date.now().toString()}-${Math.random().toString(36).substring(2, 10)}`;
+                      
+                      // 创建新的回复消息 - 更新对应的会话
+                      setConversations(prev => {
+                        const updatedConversations = [...prev];
+                        const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+                        
+                        if (targetConversation) {
+                          // 如果找到目标会话，更新它的消息
+                          const updatedMessages = [...targetConversation.messages, {
+                            id: aiMessageId,
+                            content: content,
+                            role: "assistant" as const,
+                            timestamp: new Date(),
+                            type: "answer" as const
+                          }];
+                          
+                          targetConversation.messages = updatedMessages;
+                        }
+                        
+                        return updatedConversations;
+                      });
+                      
+                      // 如果当前正在查看相同的会话，也更新当前显示的消息
+                      if (currentConversationId === activeConversationId) {
+                        setMessages(prev => {
+                          // 检查是否已经存在相同ID的消息
+                          if (!prev.some(msg => msg.id === aiMessageId)) {
+                            return [
+                              ...prev,
+                              {
+                                id: aiMessageId,
+                                content: content,
+                                role: "assistant" as const,
+                                timestamp: new Date(),
+                                type: "answer" as const
+                              }
+                            ];
+                          }
+                          return prev;
+                        });
+                      }
+                    } else {
+                      // 如果已经是answer阶段，只更新内容
+                      aiResponse += content;
+                      
+                      // 更新回复消息 - 更新对应的会话
+                      setConversations(prev => {
+                        const updatedConversations = [...prev];
+                        const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+                        
+                        if (targetConversation) {
+                          // 如果找到目标会话，更新回复消息
+                          const answerMessage = targetConversation.messages.find(msg => msg.id === aiMessageId);
+                          if (answerMessage) {
+                            answerMessage.content = aiResponse;
+                          }
+                        }
+                        
+                        return updatedConversations;
+                      });
+                      
+                      // 如果当前正在查看相同的会话，也更新当前显示的消息
+                      if (currentConversationId === activeConversationId) {
+                        setMessages(prev => {
+                          return prev.map(msg => 
+                            msg.id === aiMessageId 
+                              ? { ...msg, content: aiResponse }
+                              : msg
+                          );
+                        });
+                        
+                        // 自动滚动到底部
+                        scrollToBottom();
+                      }
                     }
-                  } catch (fixError: Error | any) {
-                    // 如果修复后仍然无法解析，记录原始数据供调试
-                    logClientMessage('ERROR', "无法修复JSON数据", {
-                      originalError: parseError.message || 'Unknown error',
-                      fixError: fixError.message || 'Unknown error',
-                      rawDataExcerpt: data.length > 100 ? data.substring(0, 100) + '...' : data
-                    });
-                    // 放弃处理此行数据
-                    continue;
                   }
                 }
-              } catch (e) {
-                console.error('Error parsing chunk:', e);
+              } catch (parseError: Error | any) {
+                // 添加更详细的错误处理和修复逻辑
+                console.error("JSON解析错误:", parseError, "原始数据:", jsonContent);
+                
+                // 尝试修复常见的JSON格式问题（如果服务器数据包含了多个JSON对象连在一起）
+                if (jsonContent.includes('}{') || jsonContent.includes('}{')) {
+                  // 可能是多个JSON对象连在一起，尝试分割并处理第一个
+                  console.log("检测到可能的多JSON对象，尝试分割处理");
+                  const firstJsonEndPos = jsonContent.indexOf('}') + 1;
+                  if (firstJsonEndPos > 0) {
+                    const firstJsonPart = jsonContent.substring(0, firstJsonEndPos);
+                    try {
+                      const parsed = JSON.parse(firstJsonPart);
+                      console.log("成功解析第一个JSON部分:", parsed);
+                      // 这里可以处理解析成功的数据...
+                    } catch (e) {
+                      console.error("分割后的JSON解析仍然失败");
+                    }
+                  }
+                }
+                
+                // 报告错误但不中断流处理
+                logClientMessage('WARN', `流数据JSON解析错误，跳过此块: ${parseError.message}`, {
+                  dataPreview: jsonContent.substring(0, 100),
+                  clientRequestId,
+                  serverRequestId: responseRequestId
+                });
+                
+                // 不阻止继续处理后续块
+                continue;
               }
             }
           }
@@ -804,7 +746,7 @@ export default function Home() {
         if (currentConversationId === activeConversationId) {
           setMessages(prev => {
             // 移除所有重试消息
-            const filtered = prev.filter(msg => !msg.id.includes('retry-message'));
+            const filtered = prev.filter(msg => !msg.id.includes('error-'));
             return [...filtered, errorMessage];
           });
         }
@@ -1203,11 +1145,14 @@ export default function Home() {
         updatedAt: new Date()
       };
       
-      setNotes(prev => 
-        prev.map(note => 
-          note.id === selectedNote.id ? updatedNote : note
-        )
-      );
+      // 更新notes数组中的对应笔记，并将更新的笔记移到顶部
+      setNotes(prev => {
+        const otherNotes = prev.filter(note => note.id !== updatedNote.id);
+        return [updatedNote, ...otherNotes];
+      });
+      
+      // 更新编辑区域显示的内容
+      setNoteContent(updatedNote.content);
       
       setSelectedNote(updatedNote);
       setIsEditingNote(false);
@@ -1240,35 +1185,15 @@ export default function Home() {
 
   // 从对话中添加内容到笔记
   const addToNote = (content: string, messageId: string) => {
-    if (selectedNote) {
-      const updatedContent = noteContent 
-        ? `${noteContent}\n\n---\n\n${content}` 
-        : content;
-      
-      const updatedMessageIds = selectedNote.messageIds 
-        ? [...selectedNote.messageIds, messageId]
-        : [messageId];
-      
-      const updatedNote = {
-        ...selectedNote,
-        content: updatedContent,
-        messageIds: updatedMessageIds,
-        updatedAt: new Date()
-      };
-      
-      setNotes(prev => 
-        prev.map(note => 
-          note.id === selectedNote.id ? updatedNote : note
-        )
-      );
-      
-      setSelectedNote(updatedNote);
-      setNoteContent(updatedContent);
-    } else {
-      // 如果没有选中的笔记，创建一个新笔记
+    if (!showNotes) {
+      setShowNotes(true);
+    }
+    
+    // 如果没有选择笔记，创建一个新笔记
+    if (!selectedNote) {
       const newNote: Note = {
         id: Date.now().toString(),
-        title: content.slice(0, 30) + (content.length > 30 ? '...' : ''),
+        title: `笔记 ${notes.length + 1}`,
         content: content,
         tags: [],
         createdAt: new Date(),
@@ -1281,10 +1206,35 @@ export default function Home() {
       setSelectedNote(newNote);
       setNoteTitle(newNote.title);
       setNoteContent(newNote.content);
-      setNoteTags([]);
-      setIsEditingNote(true);
-      setShowNotes(true);
+      setNoteTags(newNote.tags);
+      return;
     }
+    
+    // 将内容添加到已选择的笔记中
+    setSelectedNote(prev => {
+      if (!prev) return null;
+      
+      // 检查这条消息是否已经添加过
+      if (prev.messageIds && prev.messageIds.includes(messageId)) {
+        alert("这条消息已经添加到笔记中");
+        return prev;
+      }
+      
+      const updatedNote = {
+        ...prev,
+        content: prev.content + "\n\n" + content,
+        updatedAt: new Date(),
+        messageIds: [...(prev.messageIds || []), messageId]
+      };
+      
+      // 更新notes数组中的对应笔记
+      setNotes(prev => prev.map(note => note.id === updatedNote.id ? updatedNote : note));
+      
+      // 更新编辑区域显示的内容
+      setNoteContent(updatedNote.content);
+      
+      return updatedNote;
+    });
   };
 
   // 添加安全定时器，防止加载状态永久卡住
@@ -1337,6 +1287,328 @@ export default function Home() {
       }
     };
   }, [isLoading, isRequestPending, pendingConversationId, currentConversationId]);
+
+  // 处理文本选择事件
+  const handleTextSelection = () => {
+    // 调试输出
+    console.log("文本选择事件触发", {
+      isEditingNote,
+      showNotes,
+      hasSelectedNote: !!selectedNote
+    });
+    
+    // 在编辑模式下使用不同的选择逻辑
+    if (isEditingNote && selectedNote && showNotes) {
+      // 使用更明确的选择器
+      const textarea = document.querySelector('.note-edit-textarea') as HTMLTextAreaElement;
+      if (!textarea) {
+        console.log("找不到文本框元素");
+        return;
+      }
+      
+      // 获取选中的文本
+      const startPos = textarea.selectionStart;
+      const endPos = textarea.selectionEnd;
+      
+      // 检查是否有选中文本
+      if (startPos === endPos) {
+        console.log("没有选中文本");
+        return;
+      }
+      
+      const selectedStr = textarea.value.substring(startPos, endPos).trim();
+      console.log("选中的文本:", selectedStr, "从", startPos, "到", endPos);
+      
+      if (selectedStr) {
+        setSelectedText(selectedStr);
+        setSelectionRange({
+          start: startPos,
+          end: endPos
+        });
+        
+        // 计算注释提示的位置
+        const textareaRect = textarea.getBoundingClientRect();
+        
+        // 使用简化的位置计算
+        const lineHeight = parseInt(window.getComputedStyle(textarea).lineHeight) || 20;
+        const textBeforeCursor = textarea.value.substring(0, endPos);
+        const linesBeforeCursor = textBeforeCursor.split('\n').length;
+        
+        const x = textareaRect.left + (textareaRect.width / 2); // 居中
+        const y = textareaRect.top + (lineHeight * linesBeforeCursor) + 20; // 在当前行下方
+        
+        console.log("计算的位置:", {x, y, textareaRect});
+        
+        setAnnotationPromptPosition({ x, y });
+        setShowAnnotationPrompt(true);
+      }
+      return;
+    }
+    
+    // 非编辑模式的原有逻辑
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.toString().trim()) {
+      setSelectedText("");
+      setSelectionRange(null);
+      setShowAnnotationPrompt(false);
+      return;
+    }
+    
+    const selectedStr = selection.toString().trim();
+    
+    // 只在笔记查看模式下添加注释
+    if (selectedNote && !isEditingNote && showNotes) {
+      const noteContent = selectedNote.content;
+      
+      // 获取选中文本在笔记内容中的位置
+      const range = selection.getRangeAt(0);
+      const preSelectionRange = range.cloneRange();
+      preSelectionRange.selectNodeContents(range.startContainer.parentElement!);
+      preSelectionRange.setEnd(range.startContainer, range.startOffset);
+      const startOffset = noteContent.indexOf(selectedStr);
+      
+      if (startOffset >= 0) {
+        setSelectedText(selectedStr);
+        setSelectionRange({
+          start: startOffset,
+          end: startOffset + selectedStr.length
+        });
+        
+        // 计算注释提示的位置
+        const rect = range.getBoundingClientRect();
+        setAnnotationPromptPosition({
+          x: rect.left + window.scrollX + (rect.width / 2),
+          y: rect.bottom + window.scrollY
+        });
+        setShowAnnotationPrompt(true);
+      }
+    }
+  };
+  
+  // 更新事件监听
+  useEffect(() => {
+    // 为笔记编辑添加一个特定的事件处理器
+    const handleTextareaSelection = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'TEXTAREA' && isEditingNote) {
+        handleTextSelection();
+      }
+    };
+    
+    document.addEventListener('mouseup', handleTextareaSelection);
+    
+    // 笔记查看模式的事件监听
+    document.addEventListener('mouseup', handleTextSelection);
+    
+    return () => {
+      document.removeEventListener('mouseup', handleTextareaSelection);
+      document.removeEventListener('mouseup', handleTextSelection);
+    };
+  }, [selectedNote, isEditingNote, showNotes, noteContent]);
+  
+  // 在页面对应位置找到textarea并添加类名
+  // ... existing code ...
+
+                    <textarea
+                      value={noteContent}
+                      onChange={(e) => setNoteContent(e.target.value)}
+                      className="flex-1 w-full p-2 border rounded-md dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none note-edit-textarea"
+                      placeholder="笔记内容..."
+                    />
+
+  // 辅助函数：获取textarea中光标的坐标位置
+  const getCursorCoordinates = (textarea: HTMLTextAreaElement, position: number) => {
+    // 创建一个临时元素来模拟textarea的样式和内容
+    const div = document.createElement('div');
+    const span = document.createElement('span');
+    
+    // 设置div样式以匹配textarea
+    const style = window.getComputedStyle(textarea);
+    for (const prop of style) {
+      div.style[prop as any] = style.getPropertyValue(prop);
+    }
+    
+    // 确保位置是absolute而不是fixed，因为我们需要相对位置
+    div.style.position = 'absolute';
+    div.style.top = '0';
+    div.style.left = '0';
+    div.style.visibility = 'hidden';
+    
+    // 设置内容
+    div.textContent = textarea.value.substring(0, position);
+    span.textContent = 'I'; // 一个字符标记光标位置
+    div.appendChild(span);
+    
+    document.body.appendChild(div);
+    const coordinates = {
+      x: span.offsetLeft,
+      y: span.offsetTop + span.offsetHeight
+    };
+    
+    document.body.removeChild(div);
+    return coordinates;
+  };
+  
+  // 创建注释的函数
+  const createAnnotation = async () => {
+    if (!selectedText || !selectionRange || !selectedNote || !annotationQuery.trim()) return;
+    
+    setIsGeneratingExplanation(true);
+    try {
+      // 调用API生成解释
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messages: [
+            { role: "system", content: "你是一个专业的解释者，负责提供简洁而有见地的解释。" },
+            { role: "user", content: `请解释一下这段内容: "${selectedText}"\n\n我的问题是: ${annotationQuery}` }
+          ],
+          apiKey: confirmedApiKey,
+          model: selectedModel
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error('生成解释失败');
+      }
+      
+      const data = await response.json();
+      const explanation = data.choices[0].message.content;
+      
+      setGeneratedExplanation(explanation);
+      
+      // 创建新的注释
+      const newAnnotation: Annotation = {
+        id: `annotation-${Date.now()}`,
+        text: selectedText,
+        startIndex: selectionRange.start,
+        endIndex: selectionRange.end,
+        query: annotationQuery,
+        explanation: explanation,
+        createdAt: new Date()
+      };
+      
+      // 更新笔记的注释
+      const updatedNote = {
+        ...selectedNote,
+        annotations: [...(selectedNote.annotations || []), newAnnotation],
+        updatedAt: new Date()
+      };
+      
+      // 更新笔记列表
+      setNotes(prev => prev.map(note => 
+        note.id === updatedNote.id ? updatedNote : note
+      ));
+      
+      setSelectedNote(updatedNote);
+      
+      // 更新编辑框中的笔记内容（可选，如果您希望立即反映注释）
+      setNoteContent(noteContent);
+      
+      // 清除状态
+      setShowAnnotationPrompt(false);
+      setAnnotationQuery("");
+      setGeneratedExplanation("");
+      setSelectedText("");
+      setSelectionRange(null);
+      
+      // 提示用户注释已添加
+      alert("注释已添加！保存笔记后，在查看模式下可以看到带注释的内容。");
+      
+    } catch (error) {
+      console.error("创建注释失败:", error);
+      alert("创建注释失败，请重试");
+    } finally {
+      setIsGeneratingExplanation(false);
+    }
+  };
+  
+  // 显示注释内容
+  const showAnnotation = (annotation: Annotation, element: HTMLElement) => {
+    setSelectedAnnotation(annotation);
+    const rect = element.getBoundingClientRect();
+    setAnnotationPopupPosition({
+      x: rect.left + window.scrollX + (rect.width / 2),
+      y: rect.bottom + window.scrollY
+    });
+    setShowAnnotationPopup(true);
+  };
+  
+  // 渲染含有注释的笔记内容
+  const renderAnnotatedContent = (content: string, annotations?: Annotation[]) => {
+    if (!annotations || annotations.length === 0) {
+      return content;
+    }
+    
+    // 按起始位置排序注释
+    const sortedAnnotations = [...annotations].sort((a, b) => a.startIndex - b.startIndex);
+    
+    // 分段渲染内容
+    const segments = [];
+    let lastIndex = 0;
+    
+    sortedAnnotations.forEach((annotation, index) => {
+      // 添加注释前的普通文本
+      if (annotation.startIndex > lastIndex) {
+        segments.push(content.substring(lastIndex, annotation.startIndex));
+      }
+      
+      // 添加注释文本
+      segments.push(
+        <span 
+          key={annotation.id}
+          className="annotation-text text-blue-600 dark:text-blue-400 border-blue-400 dark:border-blue-500"
+          onClick={(e) => showAnnotation(annotation, e.currentTarget)}
+        >
+          {content.substring(annotation.startIndex, annotation.endIndex)}
+        </span>
+      );
+      
+      lastIndex = annotation.endIndex;
+    });
+    
+    // 添加最后一段普通文本
+    if (lastIndex < content.length) {
+      segments.push(content.substring(lastIndex));
+    }
+    
+    return <>{segments}</>;
+  };
+  
+  // 监听文本选择事件
+  useEffect(() => {
+    document.addEventListener('mouseup', handleTextSelection);
+    return () => {
+      document.removeEventListener('mouseup', handleTextSelection);
+    };
+  }, [selectedNote, isEditingNote, showNotes]);
+  
+  // 点击文档其他区域时关闭注释提示
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (showAnnotationPrompt) {
+        const target = e.target as HTMLElement;
+        if (!target.closest('.annotation-prompt')) {
+          setShowAnnotationPrompt(false);
+        }
+      }
+      
+      if (showAnnotationPopup) {
+        const target = e.target as HTMLElement;
+        if (!target.closest('.annotation-popup') && !target.closest('.annotation-text')) {
+          setShowAnnotationPopup(false);
+        }
+      }
+    };
+    
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showAnnotationPrompt, showAnnotationPopup]);
 
   return (
     <div className="flex h-screen bg-gray-100 dark:bg-gray-900 text-gray-800 dark:text-gray-200">
@@ -1834,7 +2106,15 @@ export default function Home() {
                             </div>
                           ) : (
                             <div className="whitespace-pre-wrap">
-                              {message.content}
+                              {message.role === "assistant" && message.type === "answer" ? (
+                                <div className="markdown-content">
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    {message.content}
+                                  </ReactMarkdown>
+                                </div>
+                              ) : (
+                                message.content
+                              )}
                               {message.role === "assistant" && message.type === "answer" && (
                                 <div className="flex justify-end mt-2">
                                   <button 
@@ -2099,7 +2379,7 @@ export default function Home() {
                     <textarea
                       value={noteContent}
                       onChange={(e) => setNoteContent(e.target.value)}
-                      className="flex-1 w-full p-2 border rounded-md dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                      className="flex-1 w-full p-2 border rounded-md dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none note-edit-textarea"
                       placeholder="笔记内容..."
                     />
                   </div>
@@ -2125,7 +2405,9 @@ export default function Home() {
                     </div>
                     
                     <div className="whitespace-pre-wrap">
-                      {selectedNote.content}
+                      {!isEditingNote && selectedNote ? 
+                        renderAnnotatedContent(selectedNote.content, selectedNote.annotations) 
+                        : selectedNote.content}
                     </div>
                   </div>
                 )}
@@ -2134,6 +2416,110 @@ export default function Home() {
           )}
         </div>
       </div>
+      
+      {/* 注释提示 */}
+      {showAnnotationPrompt && (
+        <div 
+          className="annotation-prompt fixed bg-white dark:bg-gray-800 shadow-xl rounded-lg z-50 p-3 border dark:border-gray-700"
+          style={{
+            left: `${annotationPromptPosition.x}px`,
+            top: `${annotationPromptPosition.y + 10}px`,
+            transform: 'translateX(-50%)',
+            maxWidth: '300px',
+            width: '100%'
+          }}
+        >
+          <div className="flex justify-between items-center mb-2">
+            <span className="text-sm font-medium">添加说明</span>
+            <button
+              onClick={() => setShowAnnotationPrompt(false)}
+              className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <div className="mb-2">
+            <div className="text-xs bg-gray-100 dark:bg-gray-700 p-2 rounded mb-2 line-clamp-2">
+              "{selectedText}"
+            </div>
+            <input
+              type="text"
+              value={annotationQuery}
+              onChange={(e) => setAnnotationQuery(e.target.value)}
+              placeholder="输入你的问题..."
+              className="w-full p-2 border rounded-md dark:bg-gray-700 dark:border-gray-600 text-sm mb-2"
+            />
+            <div className="flex justify-end space-x-2">
+              <button
+                onClick={() => setShowAnnotationPrompt(false)}
+                className="px-3 py-1 text-xs bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded"
+              >
+                取消
+              </button>
+              <button
+                onClick={createAnnotation}
+                disabled={!annotationQuery.trim() || isGeneratingExplanation}
+                className={`px-3 py-1 text-xs bg-blue-500 text-white hover:bg-blue-600 rounded flex items-center space-x-1 ${
+                  (!annotationQuery.trim() || isGeneratingExplanation) ? 'opacity-50 cursor-not-allowed' : ''
+                }`}
+              >
+                {isGeneratingExplanation ? (
+                  <>
+                    <span className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full mr-1"></span>
+                    <span>生成中...</span>
+                  </>
+                ) : (
+                  <span>生成解释</span>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* 注释内容弹出框 */}
+      {showAnnotationPopup && selectedAnnotation && (
+        <div
+          className="annotation-popup fixed bg-white dark:bg-gray-800 shadow-2xl rounded-lg z-50 border dark:border-gray-700 p-4"
+          style={{
+            left: `${annotationPopupPosition.x}px`,
+            top: `${annotationPopupPosition.y + 10}px`,
+            transform: 'translateX(-50%)',
+            maxWidth: '350px',
+            width: '100%'
+          }}
+        >
+          <div className="flex justify-between items-center mb-3">
+            <span className="font-medium">注释说明</span>
+            <button
+              onClick={() => setShowAnnotationPopup(false)}
+              className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <div className="mb-3">
+            <div className="text-sm bg-blue-50 dark:bg-blue-900/30 p-2 rounded mb-2 border-l-2 border-blue-500">
+              "{selectedAnnotation.text}"
+            </div>
+            <div className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+              问题:
+            </div>
+            <div className="text-sm mb-2">
+              {selectedAnnotation.query}
+            </div>
+            <div className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+              解释:
+            </div>
+            <div className="text-sm bg-gray-50 dark:bg-gray-700/50 p-2 rounded">
+              {selectedAnnotation.explanation}
+            </div>
+          </div>
+          <div className="text-xs text-gray-500 dark:text-gray-400 text-right">
+            {new Date(selectedAnnotation.createdAt).toLocaleString()}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -544,6 +544,60 @@ body {
   transform: translateY(0) scale(0.95);
 }
 
+/* 笔记注释样式 */
+.annotation-text {
+  position: relative;
+  display: inline;
+  border-bottom: 1px dashed;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.annotation-text:hover {
+  background-color: rgba(59, 130, 246, 0.1);
+}
+
+.dark .annotation-text:hover {
+  background-color: rgba(59, 130, 246, 0.2);
+}
+
+/* 注释弹出框样式 */
+.annotation-popup {
+  position: absolute;
+  animation: fadeIn 0.2s ease-out;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.15);
+  max-width: 300px;
+  transition: all 0.2s ease;
+}
+
+.annotation-view-popup {
+  animation: zoomIn 0.2s ease-out;
+  box-shadow: 0 5px 20px rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes zoomIn {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
 /* 页面切换动画 */
 .page-transition-enter {
   opacity: 0;
@@ -805,4 +859,103 @@ body {
 
 .dark .reasoning-header:hover {
   background-color: rgba(146, 64, 14, 0.1);
+}
+
+/* Markdown内容样式 */
+.message-bubble .markdown-content {
+  @apply text-sm leading-normal;
+}
+
+/* 标题样式 */
+.message-bubble .markdown-content h1 {
+  @apply text-2xl font-bold my-4;
+}
+
+.message-bubble .markdown-content h2 {
+  @apply text-xl font-bold my-3;
+}
+
+.message-bubble .markdown-content h3 {
+  @apply text-lg font-bold my-2;
+}
+
+.message-bubble .markdown-content h4 {
+  @apply text-base font-bold my-2;
+}
+
+.message-bubble .markdown-content h5, 
+.message-bubble .markdown-content h6 {
+  @apply text-sm font-bold my-1;
+}
+
+/* 段落和列表样式 */
+.message-bubble .markdown-content p {
+  @apply my-2;
+}
+
+.message-bubble .markdown-content ul, 
+.message-bubble .markdown-content ol {
+  @apply pl-6 my-2;
+}
+
+.message-bubble .markdown-content ul {
+  @apply list-disc;
+}
+
+.message-bubble .markdown-content ol {
+  @apply list-decimal;
+}
+
+.message-bubble .markdown-content li {
+  @apply my-1;
+}
+
+/* 链接样式 */
+.message-bubble .markdown-content a {
+  @apply text-blue-600 hover:underline;
+}
+
+.dark .message-bubble .markdown-content a {
+  @apply text-blue-400;
+}
+
+/* 代码块样式 */
+.message-bubble .markdown-content pre {
+  @apply bg-gray-100 dark:bg-gray-800 p-3 rounded my-3 overflow-x-auto;
+}
+
+.message-bubble .markdown-content code {
+  @apply font-mono text-sm bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded;
+}
+
+.message-bubble .markdown-content pre code {
+  @apply bg-transparent p-0;
+}
+
+/* 表格样式 */
+.message-bubble .markdown-content table {
+  @apply w-full border-collapse my-3;
+}
+
+.message-bubble .markdown-content th {
+  @apply bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 px-3 py-1 text-left;
+}
+
+.message-bubble .markdown-content td {
+  @apply border border-gray-300 dark:border-gray-700 px-3 py-1;
+}
+
+/* 引用样式 */
+.message-bubble .markdown-content blockquote {
+  @apply pl-4 border-l-4 border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 my-3;
+}
+
+/* 分割线样式 */
+.message-bubble .markdown-content hr {
+  @apply my-4 border-t border-gray-300 dark:border-gray-700;
+}
+
+/* 图片样式 */
+.message-bubble .markdown-content img {
+  @apply max-w-full h-auto rounded my-3;
 }
