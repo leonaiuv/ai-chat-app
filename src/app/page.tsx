@@ -123,25 +123,59 @@ export default function Home() {
     }
   }, [notes]);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
+  // 监听消息变化，自动滚动到底部
   useEffect(() => {
-    scrollToBottom();
-    
-    // 滚动所有思维链容器到底部
-    Object.keys(reasoningContentRefs.current).forEach(id => {
-      const ref = reasoningContentRefs.current[id];
-      if (ref) {
-        ref.scrollTop = ref.scrollHeight;
-      }
-    });
+    // 使用 setTimeout 确保在DOM更新后执行滚动
+    const timer = setTimeout(() => {
+      scrollToBottom();
+    }, 100);
+
+    return () => clearTimeout(timer);
   }, [messages]);
 
-  // 在容器渲染后滚动到底部
+  // 添加直接观察消息容器高度变化的监听器
   useEffect(() => {
-    // 延迟一点时间确保内容已完全渲染
+    // 创建一个ResizeObserver来监听消息容器高度变化
+    if (typeof ResizeObserver !== 'undefined' && messagesEndRef.current) {
+      const messagesList = messagesEndRef.current.parentElement;
+      if (messagesList) {
+        const resizeObserver = new ResizeObserver(() => {
+          scrollToBottom();
+        });
+        
+        resizeObserver.observe(messagesList);
+        
+        // 清理函数
+        return () => {
+          resizeObserver.disconnect();
+        };
+      }
+    }
+  }, []);
+
+  // 修改滚动到底部的函数，使其更可靠
+  const scrollToBottom = () => {
+    if (messagesEndRef.current) {
+      try {
+        // 使用更直接的方法来滚动到底部
+        const messagesList = messagesEndRef.current.parentElement;
+        if (messagesList) {
+          messagesList.scrollTop = messagesList.scrollHeight;
+        }
+      } catch (error) {
+        console.error("滚动时出错:", error);
+        // 备用方法，确保可以滚动到最新消息
+        try {
+          messagesEndRef.current.scrollIntoView({ behavior: "auto", block: "end" });
+        } catch (e) {
+          console.error("备用滚动方法失败:", e);
+        }
+      }
+    }
+  };
+
+  // 监听思维链内容变化，自动滚动到底部
+  useEffect(() => {
     const timer = setTimeout(() => {
       Object.keys(reasoningContentRefs.current).forEach(id => {
         const ref = reasoningContentRefs.current[id];
@@ -202,287 +236,349 @@ export default function Home() {
     const controller = new AbortController();
     activeRequestController.current = controller;
 
-    try {
-      // 使用辅助函数获取过滤后的消息
-      const messagesForAPI = getMessagesForAPI([...messages, newMessage]);
-      
-      // 使用中止控制器进行API调用
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messages: messagesForAPI,
-          apiKey: confirmedApiKey,
-          model: selectedModel,
-        }),
-        signal: controller.signal
-      });
+    // 尝试次数
+    let retryCount = 0;
+    const maxRetries = 3;
+    
+    // 异步获取API响应
+    const getAPIResponse = async () => {
+      try {
+        // 使用辅助函数获取过滤后的消息
+        const messagesForAPI = getMessagesForAPI([...messages, newMessage]);
+        
+        // 使用中止控制器进行API调用
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            messages: messagesForAPI,
+            apiKey: confirmedApiKey,
+            model: selectedModel,
+          }),
+          signal: controller.signal
+        });
 
-      if (!response.ok) {
-        throw new Error('API请求失败: ' + response.status);
-      }
+        if (!response.ok) {
+          throw new Error('API请求失败: ' + response.statusText);
+        }
 
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('无法读取响应流');
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('无法读取响应流');
 
-      // 创建状态用于跟踪消息类型
-      let currentPhase: "reasoning" | "answer" | null = null;
-      let aiResponse = "";
-      let reasoningResponse = "";
-      let aiMessageId = "";
-      let reasoningMessageId = "";
-      const decoder = new TextDecoder();
+        // 创建状态用于跟踪消息类型
+        let currentPhase: "reasoning" | "answer" | null = null;
+        let aiResponse = "";
+        let reasoningResponse = "";
+        let aiMessageId = "";
+        let reasoningMessageId = "";
+        const decoder = new TextDecoder();
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) {
-          // 清除待处理对话ID
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            // 清除待处理对话ID
+            if (pendingConversationId === activeConversationId) {
+              setPendingConversationId(null);
+              setIsLoading(false);
+              setIsRequestPending(false);
+            }
+            break;
+          }
+
+          // 继续处理响应，无论用户是否切换了对话
+          const chunk = decoder.decode(value);
+          const lines = chunk.split('\n').filter(line => line.trim() !== '');
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6);
+              if (data === '[DONE]') {
+                // 清除待处理对话ID
+                if (pendingConversationId === activeConversationId) {
+                  setPendingConversationId(null);
+                  setIsLoading(false);
+                  setIsRequestPending(false);
+                }
+                break;
+              }
+              try {
+                const parsed = JSON.parse(data);
+                
+                if (parsed.choices && parsed.choices[0].delta) {
+                  // 处理思维链内容
+                  if (parsed.choices[0].delta.reasoning_content) {
+                    // 如果是思维链内容
+                    const reasoningContent = parsed.choices[0].delta.reasoning_content;
+                    
+                    // 如果当前阶段不是reasoning，则创建新的思维链消息
+                    if (currentPhase !== "reasoning") {
+                      currentPhase = "reasoning";
+                      reasoningResponse = reasoningContent;
+                      reasoningMessageId = `reasoning-${Date.now().toString()}`;
+                      
+                      // 创建新的思维链消息 - 更新对应的会话
+                      setConversations(prev => {
+                        const updatedConversations = [...prev];
+                        const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+                        
+                        if (targetConversation) {
+                          // 如果找到目标会话，更新它的消息
+                          const updatedMessages = [...targetConversation.messages, {
+                            id: reasoningMessageId,
+                            content: `思考过程：${reasoningContent}`,
+                            role: "assistant" as const,
+                            timestamp: new Date(),
+                            type: "reasoning" as const
+                          }];
+                          
+                          targetConversation.messages = updatedMessages;
+                        }
+                        
+                        return updatedConversations;
+                      });
+                      
+                      // 如果当前正在查看相同的会话，也更新当前显示的消息
+                      if (currentConversationId === activeConversationId) {
+                        setMessages(prev => [
+                          ...prev,
+                          {
+                            id: reasoningMessageId,
+                            content: `思考过程：${reasoningContent}`,
+                            role: "assistant" as const,
+                            timestamp: new Date(),
+                            type: "reasoning"
+                          }
+                        ]);
+                        // 确保在添加新消息后立即滚动到底部
+                        requestAnimationFrame(() => scrollToBottom());
+                      }
+                    } else {
+                      // 已经有思维链消息，更新它
+                      reasoningResponse += reasoningContent;
+                      
+                      // 更新会话中的消息
+                      setConversations(prev => {
+                        const updatedConversations = [...prev];
+                        const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+                        
+                        if (targetConversation) {
+                          // 如果找到目标会话，更新对应的消息
+                          targetConversation.messages = targetConversation.messages.map(msg => {
+                            if (msg.id === reasoningMessageId) {
+                              return {
+                                ...msg,
+                                content: `思考过程：${reasoningResponse}`
+                              };
+                            }
+                            return msg;
+                          });
+                        }
+                        
+                        return updatedConversations;
+                      });
+                      
+                      // 如果当前正在查看相同的会话，也更新当前显示的消息
+                      if (currentConversationId === activeConversationId) {
+                        setMessages(prev => {
+                          const updatedMessages = prev.map(msg => {
+                            if (msg.id === reasoningMessageId) {
+                              return {
+                                ...msg,
+                                content: `思考过程：${reasoningResponse}`
+                              };
+                            }
+                            return msg;
+                          });
+                          return updatedMessages;
+                        });
+                        // 在内容更新后立即滚动到底部
+                        requestAnimationFrame(() => scrollToBottom());
+                      }
+                    }
+                  } 
+                  // 处理普通回复内容
+                  else if (parsed.choices[0].delta.content) {
+                    const content = parsed.choices[0].delta.content;
+                    
+                    // 如果当前阶段不是answer，则创建新的回答消息
+                    if (currentPhase !== "answer") {
+                      currentPhase = "answer";
+                      aiResponse = content;
+                      aiMessageId = `answer-${Date.now().toString()}`;
+                      
+                      // 创建新的回答消息 - 更新对应的会话
+                      setConversations(prev => {
+                        const updatedConversations = [...prev];
+                        const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+                        
+                        if (targetConversation) {
+                          // 如果找到目标会话，更新它的消息
+                          const updatedMessages = [...targetConversation.messages, {
+                            id: aiMessageId,
+                            content: aiResponse,
+                            role: "assistant" as const,
+                            timestamp: new Date(),
+                            type: "answer" as const
+                          }];
+                          
+                          targetConversation.messages = updatedMessages;
+                        }
+                        
+                        return updatedConversations;
+                      });
+                      
+                      // 如果当前正在查看相同的会话，也更新当前显示的消息
+                      if (currentConversationId === activeConversationId) {
+                        setMessages(prev => [
+                          ...prev,
+                          {
+                            id: aiMessageId,
+                            content: aiResponse,
+                            role: "assistant" as const,
+                            timestamp: new Date(),
+                            type: "answer" as const
+                          }
+                        ]);
+                        // 确保在添加新消息后立即滚动到底部 
+                        requestAnimationFrame(() => scrollToBottom());
+                      }
+                    } else {
+                      // 已经有回答消息，更新它
+                      aiResponse += content;
+                      
+                      // 更新会话中的消息
+                      setConversations(prev => {
+                        const updatedConversations = [...prev];
+                        const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+                        
+                        if (targetConversation) {
+                          // 如果找到目标会话，更新对应的消息
+                          targetConversation.messages = targetConversation.messages.map(msg => {
+                            if (msg.id === aiMessageId) {
+                              return {
+                                ...msg,
+                                content: aiResponse
+                              };
+                            }
+                            return msg;
+                          });
+                        }
+                        
+                        return updatedConversations;
+                      });
+                      
+                      // 如果当前正在查看相同的会话，也更新当前显示的消息
+                      if (currentConversationId === activeConversationId) {
+                        setMessages(prev => {
+                          const updatedMessages = prev.map(msg => {
+                            if (msg.id === aiMessageId) {
+                              return {
+                                ...msg,
+                                content: aiResponse
+                              };
+                            }
+                            return msg;
+                          });
+                          return updatedMessages;
+                        });
+                        // 在内容更新后立即滚动到底部
+                        requestAnimationFrame(() => scrollToBottom());
+                      }
+                    }
+                  }
+                }
+              } catch (e) {
+                console.error('Error parsing chunk:', e);
+              }
+            }
+          }
+        }
+      } catch (error: any) {
+        // 出现错误，清空之前创建的空消息
+        console.error("Error sending message:", error);
+        
+        // 连接错误且没有超过最大重试次数，尝试重新连接
+        if ((error.name === 'TypeError' || 
+             error.message?.includes('network') || 
+             error.message?.includes('socket') ||
+             error.message?.includes('failed') ||
+             error.message?.includes('terminated')) && 
+            retryCount < maxRetries && 
+            !controller.signal.aborted) {
+          
+          retryCount++;
+          console.log(`连接错误，正在尝试第 ${retryCount} 次重试...`);
+          
+          // 添加重试提示消息
+          setMessages(prev => {
+            // 移除上一个重试消息（如果有）
+            const filtered = prev.filter(msg => !msg.id.includes('retry-message'));
+            return [...filtered, {
+              id: `retry-message-${Date.now()}`,
+              content: `网络连接中断，正在尝试第 ${retryCount} 次重试...`,
+              role: "assistant",
+              timestamp: new Date(),
+              type: "answer"
+            }];
+          });
+          
+          // 延迟一段时间后重试
+          setTimeout(() => {
+            if (!controller.signal.aborted) {
+              getAPIResponse();
+            }
+          }, 1000 * retryCount); // 递增重试延迟
+          return;
+        }
+        
+        // 如果不是用户主动中止请求导致的错误，才显示错误消息
+        if (!(error instanceof DOMException && error.name === 'AbortError')) {
           if (pendingConversationId === activeConversationId) {
             setPendingConversationId(null);
             setIsLoading(false);
             setIsRequestPending(false);
           }
-          break;
-        }
-
-        // 继续处理响应，无论用户是否切换了对话
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n').filter(line => line.trim() !== '');
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            if (data === '[DONE]') {
-              // 清除待处理对话ID
-              if (pendingConversationId === activeConversationId) {
-                setPendingConversationId(null);
-                setIsLoading(false);
-                setIsRequestPending(false);
-              }
-              break;
+          
+          // 创建错误消息并显示详细信息
+          const errorMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            content: `抱歉，发生了错误：${error.message || '未知错误'}。请稍后重试。`,
+            role: "assistant" as const,
+            timestamp: new Date(),
+            type: "answer"
+          };
+          
+          // 更新对应会话的消息
+          setConversations(prev => {
+            const updatedConversations = [...prev];
+            const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+            
+            if (targetConversation) {
+              // 移除所有重试消息
+              targetConversation.messages = targetConversation.messages
+                .filter(msg => !msg.id.includes('retry-message'))
+                .concat(errorMessage);
             }
-            try {
-              const parsed = JSON.parse(data);
-              
-              if (parsed.choices && parsed.choices[0].delta) {
-                // 处理思维链内容
-                if (parsed.choices[0].delta.reasoning_content) {
-                  // 如果是思维链内容
-                  const reasoningContent = parsed.choices[0].delta.reasoning_content;
-                  
-                  // 如果当前阶段不是reasoning，则创建新的思维链消息
-                  if (currentPhase !== "reasoning") {
-                    currentPhase = "reasoning";
-                    reasoningResponse = reasoningContent;
-                    reasoningMessageId = `reasoning-${Date.now().toString()}`;
-                    
-                    // 创建新的思维链消息 - 更新对应的会话
-                    setConversations(prev => {
-                      const updatedConversations = [...prev];
-                      const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
-                      
-                      if (targetConversation) {
-                        // 如果找到目标会话，更新它的消息
-                        const updatedMessages = [...targetConversation.messages, {
-                          id: reasoningMessageId,
-                          content: `思考过程：${reasoningContent}`,
-                          role: "assistant" as const,
-                          timestamp: new Date(),
-                          type: "reasoning" as const
-                        }];
-                        
-                        targetConversation.messages = updatedMessages;
-                      }
-                      
-                      return updatedConversations;
-                    });
-                    
-                    // 如果当前正在查看相同的会话，也更新当前显示的消息
-                    if (currentConversationId === activeConversationId) {
-                      setMessages(prev => [
-                        ...prev,
-                        {
-                          id: reasoningMessageId,
-                          content: `思考过程：${reasoningContent}`,
-                          role: "assistant" as const,
-                          timestamp: new Date(),
-                          type: "reasoning"
-                        }
-                      ]);
-                    }
-                  } else {
-                    // 已经有思维链消息，更新它
-                    reasoningResponse += reasoningContent;
-                    
-                    // 更新会话中的消息
-                    setConversations(prev => {
-                      const updatedConversations = [...prev];
-                      const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
-                      
-                      if (targetConversation) {
-                        // 如果找到目标会话，更新对应的消息
-                        targetConversation.messages = targetConversation.messages.map(msg => {
-                          if (msg.id === reasoningMessageId) {
-                            return {
-                              ...msg,
-                              content: `思考过程：${reasoningResponse}`
-                            };
-                          }
-                          return msg;
-                        });
-                      }
-                      
-                      return updatedConversations;
-                    });
-                    
-                    // 如果当前正在查看相同的会话，也更新当前显示的消息
-                    if (currentConversationId === activeConversationId) {
-                      setMessages(prev => {
-                        return prev.map(msg => {
-                          if (msg.id === reasoningMessageId) {
-                            return {
-                              ...msg,
-                              content: `思考过程：${reasoningResponse}`
-                            };
-                          }
-                          return msg;
-                        });
-                      });
-                      
-                      // 对更新的思维链内容自动滚动到底部
-                      setTimeout(() => scrollReasoningToBottom(reasoningMessageId), 0);
-                    }
-                  }
-                } 
-                // 处理普通回复内容
-                else if (parsed.choices[0].delta.content) {
-                  const content = parsed.choices[0].delta.content;
-                  
-                  // 如果当前阶段不是answer，则创建新的回答消息
-                  if (currentPhase !== "answer") {
-                    currentPhase = "answer";
-                    aiResponse = content;
-                    aiMessageId = `answer-${Date.now().toString()}`;
-                    
-                    // 创建新的回答消息 - 更新对应的会话
-                    setConversations(prev => {
-                      const updatedConversations = [...prev];
-                      const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
-                      
-                      if (targetConversation) {
-                        // 如果找到目标会话，更新它的消息
-                        const updatedMessages = [...targetConversation.messages, {
-                          id: aiMessageId,
-                          content: aiResponse,
-                          role: "assistant" as const,
-                          timestamp: new Date(),
-                          type: "answer" as const
-                        }];
-                        
-                        targetConversation.messages = updatedMessages;
-                      }
-                      
-                      return updatedConversations;
-                    });
-                    
-                    // 如果当前正在查看相同的会话，也更新当前显示的消息
-                    if (currentConversationId === activeConversationId) {
-                      setMessages(prev => [
-                        ...prev,
-                        {
-                          id: aiMessageId,
-                          content: aiResponse,
-                          role: "assistant" as const,
-                          timestamp: new Date(),
-                          type: "answer"
-                        }
-                      ]);
-                    }
-                  } else {
-                    // 已经有回答消息，更新它
-                    aiResponse += content;
-                    
-                    // 更新会话中的消息
-                    setConversations(prev => {
-                      const updatedConversations = [...prev];
-                      const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
-                      
-                      if (targetConversation) {
-                        // 如果找到目标会话，更新对应的消息
-                        targetConversation.messages = targetConversation.messages.map(msg => {
-                          if (msg.id === aiMessageId) {
-                            return {
-                              ...msg,
-                              content: aiResponse
-                            };
-                          }
-                          return msg;
-                        });
-                      }
-                      
-                      return updatedConversations;
-                    });
-                    
-                    // 如果当前正在查看相同的会话，也更新当前显示的消息
-                    if (currentConversationId === activeConversationId) {
-                      setMessages(prev => {
-                        return prev.map(msg => {
-                          if (msg.id === aiMessageId) {
-                            return {
-                              ...msg,
-                              content: aiResponse
-                            };
-                          }
-                          return msg;
-                        });
-                      });
-                    }
-                  }
-                }
-              }
-            } catch (e) {
-              console.error('Error parsing chunk:', e);
-            }
+            
+            return updatedConversations;
+          });
+          
+          // 如果当前正在查看相同的会话，也更新当前显示的消息
+          if (currentConversationId === activeConversationId) {
+            setMessages(prev => {
+              // 移除所有重试消息
+              const filtered = prev.filter(msg => !msg.id.includes('retry-message'));
+              return [...filtered, errorMessage];
+            });
           }
         }
       }
-    } catch (error) {
-      console.error("Error sending message:", error);
-      // 如果不是用户主动中止请求导致的错误，才显示错误消息
-      if (!(error instanceof DOMException && error.name === 'AbortError')) {
-        if (pendingConversationId === activeConversationId) {
-          setPendingConversationId(null);
-          setIsLoading(false);
-          setIsRequestPending(false);
-        }
-        
-        const errorMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          content: "抱歉，发生了错误，请稍后重试。",
-          role: "assistant" as const,
-          timestamp: new Date(),
-        };
-        
-        // 更新对应会话的消息
-        setConversations(prev => {
-          const updatedConversations = [...prev];
-          const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
-          
-          if (targetConversation) {
-            targetConversation.messages = [...targetConversation.messages, errorMessage];
-          }
-          
-          return updatedConversations;
-        });
-        
-        // 如果当前正在查看相同的会话，也更新当前显示的消息
-        if (currentConversationId === activeConversationId) {
-          setMessages((prev) => [...prev, errorMessage]);
-        }
-      }
-    }
+    };
+    
+    // 开始执行
+    getAPIResponse();
   };
 
   // 确认API Key
@@ -1208,7 +1304,7 @@ export default function Home() {
           {/* 对话区域 */}
           <div className={`flex-1 flex flex-col ${showNotes && selectedNote ? 'md:w-1/2' : 'w-full'}`}>
             {/* 消息列表 */}
-            <div className="flex-1 overflow-y-auto p-4" ref={messagesEndRef}>
+            <div className="flex-1 overflow-y-auto p-4">
               {messages.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center">
                   <div className="w-16 h-16 mb-4 rounded-full bg-blue-500 flex items-center justify-center text-white">
@@ -1338,6 +1434,8 @@ export default function Home() {
                   </div>
                 </div>
               )}
+              {/* 添加一个空的div，用于滚动定位 */}
+              <div ref={messagesEndRef}></div>
             </div>
 
             {/* 输入区域 */}
