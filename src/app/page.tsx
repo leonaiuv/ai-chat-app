@@ -5,6 +5,7 @@ import Image from "next/image";
 import { Send, Trash2, Settings, Menu, X, Moon, Sun, Plus, History, Download, Pencil, ChevronRight, ChevronDown, Book, FilePlus, Tag, Search } from "lucide-react";
 import { useTheme } from "next-themes";
 import { MODELS, LOCAL_STORAGE_KEYS } from "@/lib/constants";
+import { v4 as uuidv4 } from 'uuid';
 
 interface Message {
   id: string;
@@ -32,6 +33,32 @@ interface Note {
   conversationId?: string;
   messageIds?: string[];
 }
+
+// 定义前端日志记录函数
+const logClientMessage = (level: string, message: string, data?: any) => {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    level,
+    message,
+    ...(data && { data })
+  };
+  
+  switch (level) {
+    case 'DEBUG':
+      console.debug('%c[调试]', 'color: gray; font-weight: bold', message, data ? data : '');
+      break;
+    case 'INFO':
+      console.info('%c[信息]', 'color: green; font-weight: bold', message, data ? data : '');
+      break;
+    case 'WARN':
+      console.warn('%c[警告]', 'color: orange; font-weight: bold', message, data ? data : '');
+      break;
+    case 'ERROR':
+      console.error('%c[错误]', 'color: red; font-weight: bold', message, data ? data : '');
+      break;
+  }
+};
 
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -212,7 +239,11 @@ export default function Home() {
   };
 
   const handleSendMessage = async () => {
+    // 防止空消息或已有请求正在处理时发送
     if (input.trim() === "" || !confirmedApiKey || isRequestPending) return;
+
+    // 取消之前正在进行的请求
+    cancelOngoingRequest();
     
     const newId = Date.now().toString();
     const newMessage: Message = {
@@ -242,6 +273,16 @@ export default function Home() {
     
     // 异步获取API响应
     const getAPIResponse = async () => {
+      // 为每次前端请求生成客户端请求ID，便于日志跟踪
+      const clientRequestId = uuidv4().substring(0, 8);
+      let responseRequestId: string | null = null;
+      
+      logClientMessage('INFO', '开始发送API请求', {
+        clientRequestId,
+        model: selectedModel,
+        messageCount: messages.length + 1
+      });
+      
       try {
         // 使用辅助函数获取过滤后的消息
         const messagesForAPI = getMessagesForAPI([...messages, newMessage]);
@@ -251,6 +292,7 @@ export default function Home() {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            'X-Client-Request-ID': clientRequestId // 添加客户端请求ID
           },
           body: JSON.stringify({
             messages: messagesForAPI,
@@ -260,8 +302,26 @@ export default function Home() {
           signal: controller.signal
         });
 
+        // 从响应头获取请求ID
+        responseRequestId = response.headers.get('X-Request-ID');
+        
+        logClientMessage('INFO', 'API响应已接收', {
+          clientRequestId,
+          serverRequestId: responseRequestId,
+          status: response.status,
+          statusText: response.statusText
+        });
+
         if (!response.ok) {
-          throw new Error('API请求失败: ' + response.statusText);
+          const errorText = await response.text();
+          logClientMessage('ERROR', 'API请求失败', {
+            clientRequestId,
+            serverRequestId: responseRequestId,
+            status: response.status,
+            statusText: response.statusText,
+            errorDetails: errorText
+          });
+          throw new Error(`API请求失败: ${response.statusText}. 请求ID: ${responseRequestId || clientRequestId}`);
         }
 
         const reader = response.body?.getReader();
@@ -316,7 +376,8 @@ export default function Home() {
                     if (currentPhase !== "reasoning") {
                       currentPhase = "reasoning";
                       reasoningResponse = reasoningContent;
-                      reasoningMessageId = `reasoning-${Date.now().toString()}`;
+                      // 添加更多随机性，确保ID唯一
+                      reasoningMessageId = `reasoning-${Date.now().toString()}-${Math.random().toString(36).substring(2, 10)}`;
                       
                       // 创建新的思维链消息 - 更新对应的会话
                       setConversations(prev => {
@@ -406,7 +467,8 @@ export default function Home() {
                     if (currentPhase !== "answer") {
                       currentPhase = "answer";
                       aiResponse = content;
-                      aiMessageId = `answer-${Date.now().toString()}`;
+                      // 添加更多随机性，确保ID唯一
+                      aiMessageId = `answer-${Date.now().toString()}-${Math.random().toString(36).substring(2, 10)}`;
                       
                       // 创建新的回答消息 - 更新对应的会话
                       setConversations(prev => {
@@ -488,6 +550,19 @@ export default function Home() {
                       }
                     }
                   }
+                } else if (parsed.error) {
+                  // 处理API返回的错误信息
+                  console.error("API返回错误:", parsed.error);
+                  // 检查是否是超时错误
+                  const errorMsg = typeof parsed.error === 'string' 
+                    ? parsed.error 
+                    : (parsed.error.message || "API返回未知错误");
+                    
+                  if (errorMsg.includes('timeout') || errorMsg.includes('aborted due to timeout')) {
+                    throw new Error("请求超时，AI回复时间过长。请尝试重新发送或简化您的问题。");
+                  } else {
+                    throw new Error(errorMsg);
+                  }
                 }
               } catch (e) {
                 console.error('Error parsing chunk:', e);
@@ -497,19 +572,35 @@ export default function Home() {
         }
       } catch (error: any) {
         // 出现错误，清空之前创建的空消息
-        console.error("Error sending message:", error);
+        logClientMessage('ERROR', "发送消息时出错", {
+          clientRequestId,
+          serverRequestId: responseRequestId,
+          errorMessage: error.message,
+          errorStack: error.stack
+        });
         
-        // 连接错误且没有超过最大重试次数，尝试重新连接
-        if ((error.name === 'TypeError' || 
+        // 检测是否是超时错误
+        const isTimeoutError = error.message?.includes('timeout') || 
+                               error.message?.includes('aborted due to timeout');
+                              
+        // 连接错误或超时错误且没有超过最大重试次数，尝试重新连接
+        if (((error.name === 'TypeError' || 
              error.message?.includes('network') || 
              error.message?.includes('socket') ||
              error.message?.includes('failed') ||
              error.message?.includes('terminated')) && 
             retryCount < maxRetries && 
-            !controller.signal.aborted) {
+            !controller.signal.aborted) ||
+            // 超时错误只重试一次，减少用户等待
+            (isTimeoutError && retryCount < 1)) {
           
           retryCount++;
-          console.log(`连接错误，正在尝试第 ${retryCount} 次重试...`);
+          const errorType = isTimeoutError ? "请求超时" : "连接错误";
+          logClientMessage('WARN', `${errorType}，正在尝试第 ${retryCount} 次重试`, {
+            clientRequestId,
+            serverRequestId: responseRequestId,
+            retryCount
+          });
           
           // 添加重试提示消息
           setMessages(prev => {
@@ -517,7 +608,9 @@ export default function Home() {
             const filtered = prev.filter(msg => !msg.id.includes('retry-message'));
             return [...filtered, {
               id: `retry-message-${Date.now()}`,
-              content: `网络连接中断，正在尝试第 ${retryCount} 次重试...`,
+              content: isTimeoutError 
+                ? `请求超时，AI回复时间过长，正在尝试重新连接...`
+                : `网络连接中断，正在尝试第 ${retryCount} 次重试...`,
               role: "assistant",
               timestamp: new Date(),
               type: "answer"
@@ -529,22 +622,42 @@ export default function Home() {
             if (!controller.signal.aborted) {
               getAPIResponse();
             }
-          }, 1000 * retryCount); // 递增重试延迟
+          }, isTimeoutError ? 2000 : 1000 * retryCount); // 超时错误使用固定的延迟
           return;
         }
         
         // 如果不是用户主动中止请求导致的错误，才显示错误消息
         if (!(error instanceof DOMException && error.name === 'AbortError')) {
-          if (pendingConversationId === activeConversationId) {
-            setPendingConversationId(null);
-            setIsLoading(false);
-            setIsRequestPending(false);
-          }
+          // 清除所有锁定状态，让用户可以继续操作
+          setPendingConversationId(null);
+          setIsLoading(false);
+          setIsRequestPending(false);
           
           // 创建错误消息并显示详细信息
+          let errorContent = `抱歉，发生了错误：${error.message || '未知错误'}。请稍后重试。`;
+          
+          // 添加请求ID到错误消息中，便于问题追踪
+          const requestIdInfo = responseRequestId ? 
+            `\n\n请求ID: ${responseRequestId}` : 
+            clientRequestId ? 
+              `\n\n客户端请求ID: ${clientRequestId}` : '';
+          
+          // 为超时错误提供特殊提示
+          if (error.message?.includes('timeout') || error.message?.includes('aborted due to timeout')) {
+            errorContent = `抱歉，请求超时。AI回复时间过长，可能是因为您的问题过于复杂。请尝试：\n1. 简化您的问题\n2. 将问题拆分为多个小问题\n3. 使用强制解锁功能并重试${requestIdInfo}`;
+          } else {
+            errorContent = `抱歉，发生了错误：${error.message || '未知错误'}。请稍后重试。${requestIdInfo}`;
+          }
+          
+          logClientMessage('ERROR', '错误信息已发送给用户', {
+            clientRequestId,
+            serverRequestId: responseRequestId,
+            errorContent
+          });
+          
           const errorMessage: Message = {
             id: (Date.now() + 1).toString(),
-            content: `抱歉，发生了错误：${error.message || '未知错误'}。请稍后重试。`,
+            content: errorContent,
             role: "assistant" as const,
             timestamp: new Date(),
             type: "answer"
@@ -574,11 +687,57 @@ export default function Home() {
             });
           }
         }
+      } finally {
+        // 无论成功或失败，确保加载状态被重置
+        // 此处添加额外保障，防止某些情况下状态未被重置
+        setIsLoading(false);
+        setIsRequestPending(false);
+        setPendingConversationId(null); // 无条件重置pendingConversationId，确保解锁输入框
       }
     };
     
     // 开始执行
     getAPIResponse();
+  };
+
+  // 强制解锁输入框
+  const forceUnlockInput = () => {
+    // 取消正在进行的请求
+    cancelOngoingRequest();
+    // 清除所有锁定状态
+    setPendingConversationId(null);
+    setIsLoading(false);
+    setIsRequestPending(false);
+    
+    // 在当前对话中添加解锁提示消息
+    if (currentConversationId) {
+      const unlockMessage: Message = {
+        id: `unlock-${Date.now()}`,
+        content: "⚠️ 用户已强制取消请求并解锁输入框",
+        role: "assistant",
+        timestamp: new Date(),
+        type: "answer"
+      };
+      
+      setMessages(prev => [...prev, unlockMessage]);
+      
+      // 同时更新到会话历史
+      setConversations(prev => {
+        const updatedConversations = [...prev];
+        const targetConversation = updatedConversations.find(
+          conv => conv.id === currentConversationId
+        );
+        
+        if (targetConversation) {
+          targetConversation.messages = [
+            ...targetConversation.messages,
+            unlockMessage
+          ];
+        }
+        
+        return updatedConversations;
+      });
+    }
   };
 
   // 确认API Key
@@ -796,6 +955,45 @@ export default function Home() {
     };
   }, []);
 
+  // 添加紧急按钮快捷键
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      // Alt+Shift+U 组合键作为紧急解锁快捷键
+      if (event.altKey && event.shiftKey && event.key === 'U') {
+        console.log('检测到紧急解锁快捷键');
+        // 无条件重置所有状态
+        setIsLoading(false);
+        setIsRequestPending(false);
+        setPendingConversationId(null);
+        if (activeRequestController.current) {
+          try {
+            activeRequestController.current.abort();
+            abortedControllers.current.add(activeRequestController.current);
+          } catch (error) {
+            console.error("取消请求时出错:", error);
+          }
+          activeRequestController.current = null;
+        }
+        
+        // 添加解锁提示消息
+        const unlockMessage: Message = {
+          id: `emergency-unlock-${Date.now()}`,
+          content: "⚠️ 系统已通过紧急快捷键重置所有状态并解锁输入框",
+          role: "assistant",
+          timestamp: new Date(),
+          type: "answer"
+        };
+        
+        setMessages(prev => [...prev, unlockMessage]);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
+
   // 创建新笔记
   const createNewNote = () => {
     const newNote: Note = {
@@ -927,6 +1125,57 @@ export default function Home() {
       setShowNotes(true);
     }
   };
+
+  // 添加安全定时器，防止加载状态永久卡住
+  useEffect(() => {
+    // 如果isLoading或isRequestPending状态持续超过30秒，则自动重置所有状态
+    let safetyTimer: NodeJS.Timeout | null = null;
+    
+    if (isLoading || isRequestPending || pendingConversationId !== null) {
+      safetyTimer = setTimeout(() => {
+        console.log("检测到锁定状态持续时间过长，自动重置所有状态");
+        setIsLoading(false);
+        setIsRequestPending(false);
+        setPendingConversationId(null);
+        
+        // 添加错误提示消息
+        if (currentConversationId) {
+          const timeoutMessage: Message = {
+            id: `timeout-${Date.now()}`,
+            content: "⚠️ 系统检测到请求时间过长，已自动解锁输入框。如需继续获取回复，请点击下方的强制解锁输入框按钮。",
+            role: "assistant",
+            timestamp: new Date(),
+            type: "answer"
+          };
+          
+          setMessages(prev => [...prev, timeoutMessage]);
+          
+          // 同时更新到会话历史
+          setConversations(prev => {
+            const updatedConversations = [...prev];
+            const targetConversation = updatedConversations.find(
+              conv => conv.id === currentConversationId
+            );
+            
+            if (targetConversation) {
+              targetConversation.messages = [
+                ...targetConversation.messages,
+                timeoutMessage
+              ];
+            }
+            
+            return updatedConversations;
+          });
+        }
+      }, 300000); // 300秒后自动重置
+    }
+    
+    return () => {
+      if (safetyTimer) {
+        clearTimeout(safetyTimer);
+      }
+    };
+  }, [isLoading, isRequestPending, pendingConversationId, currentConversationId]);
 
   return (
     <div className="flex h-screen bg-gray-100 dark:bg-gray-900 text-gray-800 dark:text-gray-200">
@@ -1180,6 +1429,23 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center space-x-2">
+            {/* 紧急解锁按钮 */}
+            {(isLoading || isRequestPending || pendingConversationId !== null) && (
+              <button
+                onClick={forceUnlockInput}
+                className="p-2 bg-amber-500 hover:bg-amber-600 text-white rounded-full relative"
+                title="紧急解锁输入框"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                </svg>
+                <span className="absolute top-0 right-0 flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
+                </span>
+              </button>
+            )}
             <button
               onClick={clearChat}
               className="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-full"
@@ -1458,12 +1724,71 @@ export default function Home() {
                   <Send size={20} />
                 </button>
               </div>
-              {pendingConversationId && pendingConversationId !== currentConversationId && (
-                <div className="mt-2 text-xs text-amber-600 dark:text-amber-400 flex items-center">
-                  <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
-                  </svg>
-                  正在另一个对话中等待AI回复，在回复完成前无法发送新消息
+              {pendingConversationId && (
+                <div className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+                  <div className="flex items-center">
+                    <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                    </svg>
+                    {pendingConversationId === currentConversationId 
+                      ? "正在等待AI回复，请稍候..."
+                      : <span>
+                          正在<strong className="text-orange-500">"{conversations.find(c => c.id === pendingConversationId)?.title || '另一个对话'}"</strong>中等待AI回复。
+                          <br />您可以浏览其他对话，但在当前请求完成前无法发送新消息。
+                        </span>
+                    }
+                  </div>
+                  <div className="mt-1 flex justify-between">
+                    <button
+                      onClick={forceUnlockInput}
+                      className="px-2 py-1 bg-amber-500 text-white text-xs rounded hover:bg-amber-600 transition-colors"
+                    >
+                      强制解锁输入框
+                    </button>
+                    <button
+                      onClick={() => {
+                        // 取消当前请求
+                        cancelOngoingRequest();
+                        // 清除待处理对话ID
+                        setPendingConversationId(null);
+                        // 添加用户取消消息
+                        if (pendingConversationId) {
+                          const cancelMessage: Message = {
+                            id: `cancel-${Date.now()}`,
+                            content: "用户取消了请求",
+                            role: "assistant",
+                            timestamp: new Date(),
+                            type: "answer"
+                          };
+                          
+                          // 更新对应会话的消息
+                          setConversations(prev => {
+                            const updatedConversations = [...prev];
+                            const targetConversation = updatedConversations.find(
+                              conv => conv.id === pendingConversationId
+                            );
+                            
+                            if (targetConversation) {
+                              targetConversation.messages = [
+                                ...targetConversation.messages,
+                                cancelMessage
+                              ];
+                            }
+                            
+                            return updatedConversations;
+                          });
+                          
+                          // 如果当前正在查看相同的会话，也更新当前显示的消息
+                          if (currentConversationId === pendingConversationId) {
+                            setMessages(prev => [...prev, cancelMessage]);
+                          }
+                        }
+                      }}
+                      className="px-2 py-1 bg-red-500 text-white text-xs rounded hover:bg-red-600 transition-colors"
+                    >
+                      取消请求
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
