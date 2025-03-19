@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import Image from "next/image";
-import { Send, Trash2, Settings, Menu, X, Moon, Sun, Plus } from "lucide-react";
+import { Send, Trash2, Settings, Menu, X, Moon, Sun, Plus, History, Download, Pencil, ChevronRight, ChevronDown } from "lucide-react";
 import { useTheme } from "next-themes";
 import { MODELS, LOCAL_STORAGE_KEYS } from "@/lib/constants";
 
@@ -19,6 +19,7 @@ interface Conversation {
   title: string;
   messages: Message[];
   model: string;
+  isEditing?: boolean;
 }
 
 export default function Home() {
@@ -32,7 +33,14 @@ export default function Home() {
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [confirmedApiKey, setConfirmedApiKey] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const reasoningContentRefs = useRef<{[key: string]: HTMLDivElement | null}>({});
+  const [collapsedReasonings, setCollapsedReasonings] = useState<{[key: string]: boolean}>({});
+  const [expandedReasonings, setExpandedReasonings] = useState<{[key: string]: boolean}>({});
   const { theme, setTheme } = useTheme();
+  const [isRequestPending, setIsRequestPending] = useState(false);
+  const activeRequestController = useRef<AbortController | null>(null);
+  const [pendingConversationId, setPendingConversationId] = useState<string | null>(null);
+  const abortedControllers = useRef<Set<AbortController>>(new Set());
 
   // 从本地存储加载数据
   useEffect(() => {
@@ -64,10 +72,56 @@ export default function Home() {
 
   useEffect(() => {
     scrollToBottom();
+    
+    // 滚动所有思维链容器到底部
+    Object.keys(reasoningContentRefs.current).forEach(id => {
+      const ref = reasoningContentRefs.current[id];
+      if (ref) {
+        ref.scrollTop = ref.scrollHeight;
+      }
+    });
   }, [messages]);
 
+  // 在容器渲染后滚动到底部
+  useEffect(() => {
+    // 延迟一点时间确保内容已完全渲染
+    const timer = setTimeout(() => {
+      Object.keys(reasoningContentRefs.current).forEach(id => {
+        const ref = reasoningContentRefs.current[id];
+        if (ref && !collapsedReasonings[id]) {
+          ref.scrollTop = ref.scrollHeight;
+        }
+      });
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [messages, collapsedReasonings]);
+
+  // 自动滚动API响应内容到底部
+  const scrollReasoningToBottom = (messageId: string) => {
+    const ref = reasoningContentRefs.current[messageId];
+    if (ref && !collapsedReasonings[messageId]) {
+      ref.scrollTop = ref.scrollHeight;
+    }
+  };
+
+  // 取消正在进行的请求
+  const cancelOngoingRequest = () => {
+    if (activeRequestController.current && !abortedControllers.current.has(activeRequestController.current)) {
+      try {
+        activeRequestController.current.abort();
+        abortedControllers.current.add(activeRequestController.current);
+      } catch (error) {
+        console.error("取消请求时出错:", error);
+      }
+      activeRequestController.current = null;
+      setIsLoading(false);
+      setIsRequestPending(false);
+    }
+  };
+
   const handleSendMessage = async () => {
-    if (input.trim() === "" || !confirmedApiKey) return;
+    if (input.trim() === "" || !confirmedApiKey || isRequestPending) return;
     
     const newId = Date.now().toString();
     const newMessage: Message = {
@@ -77,15 +131,25 @@ export default function Home() {
       timestamp: new Date(),
     };
     
+    // 更新当前会话的消息
     setMessages((prev) => [...prev, newMessage]);
     setInput("");
     setIsLoading(true);
+    setIsRequestPending(true);
+    
+    // 记录当前正在等待响应的对话ID
+    const activeConversationId = currentConversationId;
+    setPendingConversationId(activeConversationId);
+
+    // 创建一个新的中止控制器
+    const controller = new AbortController();
+    activeRequestController.current = controller;
 
     try {
       // 使用辅助函数获取过滤后的消息
       const messagesForAPI = getMessagesForAPI([...messages, newMessage]);
       
-      // 直接使用fetch进行API调用
+      // 使用中止控制器进行API调用
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
@@ -96,6 +160,7 @@ export default function Home() {
           apiKey: confirmedApiKey,
           model: selectedModel,
         }),
+        signal: controller.signal
       });
 
       if (!response.ok) {
@@ -116,10 +181,16 @@ export default function Home() {
       while (true) {
         const { done, value } = await reader.read();
         if (done) {
-          setIsLoading(false);
+          // 清除待处理对话ID
+          if (pendingConversationId === activeConversationId) {
+            setPendingConversationId(null);
+            setIsLoading(false);
+            setIsRequestPending(false);
+          }
           break;
         }
 
+        // 继续处理响应，无论用户是否切换了对话
         const chunk = decoder.decode(value);
         const lines = chunk.split('\n').filter(line => line.trim() !== '');
 
@@ -127,7 +198,12 @@ export default function Home() {
           if (line.startsWith('data: ')) {
             const data = line.slice(6);
             if (data === '[DONE]') {
-              setIsLoading(false);
+              // 清除待处理对话ID
+              if (pendingConversationId === activeConversationId) {
+                setPendingConversationId(null);
+                setIsLoading(false);
+                setIsRequestPending(false);
+              }
               break;
             }
             try {
@@ -145,31 +221,82 @@ export default function Home() {
                     reasoningResponse = reasoningContent;
                     reasoningMessageId = `reasoning-${Date.now().toString()}`;
                     
-                    // 创建新的思维链消息
-                    setMessages(prev => [
-                      ...prev,
-                      {
-                        id: reasoningMessageId,
-                        content: `思考过程：${reasoningContent}`,
-                        role: "assistant",
-                        timestamp: new Date(),
-                        type: "reasoning"
+                    // 创建新的思维链消息 - 更新对应的会话
+                    setConversations(prev => {
+                      const updatedConversations = [...prev];
+                      const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+                      
+                      if (targetConversation) {
+                        // 如果找到目标会话，更新它的消息
+                        const updatedMessages = [...targetConversation.messages, {
+                          id: reasoningMessageId,
+                          content: `思考过程：${reasoningContent}`,
+                          role: "assistant" as const,
+                          timestamp: new Date(),
+                          type: "reasoning" as const
+                        }];
+                        
+                        targetConversation.messages = updatedMessages;
                       }
-                    ]);
+                      
+                      return updatedConversations;
+                    });
+                    
+                    // 如果当前正在查看相同的会话，也更新当前显示的消息
+                    if (currentConversationId === activeConversationId) {
+                      setMessages(prev => [
+                        ...prev,
+                        {
+                          id: reasoningMessageId,
+                          content: `思考过程：${reasoningContent}`,
+                          role: "assistant" as const,
+                          timestamp: new Date(),
+                          type: "reasoning"
+                        }
+                      ]);
+                    }
                   } else {
                     // 已经有思维链消息，更新它
                     reasoningResponse += reasoningContent;
-                    setMessages(prev => {
-                      return prev.map(msg => {
-                        if (msg.id === reasoningMessageId) {
-                          return {
-                            ...msg,
-                            content: `思考过程：${reasoningResponse}`
-                          };
-                        }
-                        return msg;
-                      });
+                    
+                    // 更新会话中的消息
+                    setConversations(prev => {
+                      const updatedConversations = [...prev];
+                      const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+                      
+                      if (targetConversation) {
+                        // 如果找到目标会话，更新对应的消息
+                        targetConversation.messages = targetConversation.messages.map(msg => {
+                          if (msg.id === reasoningMessageId) {
+                            return {
+                              ...msg,
+                              content: `思考过程：${reasoningResponse}`
+                            };
+                          }
+                          return msg;
+                        });
+                      }
+                      
+                      return updatedConversations;
                     });
+                    
+                    // 如果当前正在查看相同的会话，也更新当前显示的消息
+                    if (currentConversationId === activeConversationId) {
+                      setMessages(prev => {
+                        return prev.map(msg => {
+                          if (msg.id === reasoningMessageId) {
+                            return {
+                              ...msg,
+                              content: `思考过程：${reasoningResponse}`
+                            };
+                          }
+                          return msg;
+                        });
+                      });
+                      
+                      // 对更新的思维链内容自动滚动到底部
+                      setTimeout(() => scrollReasoningToBottom(reasoningMessageId), 0);
+                    }
                   }
                 } 
                 // 处理普通回复内容
@@ -182,31 +309,79 @@ export default function Home() {
                     aiResponse = content;
                     aiMessageId = `answer-${Date.now().toString()}`;
                     
-                    // 创建新的回答消息
-                    setMessages(prev => [
-                      ...prev,
-                      {
-                        id: aiMessageId,
-                        content: aiResponse,
-                        role: "assistant",
-                        timestamp: new Date(),
-                        type: "answer"
+                    // 创建新的回答消息 - 更新对应的会话
+                    setConversations(prev => {
+                      const updatedConversations = [...prev];
+                      const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+                      
+                      if (targetConversation) {
+                        // 如果找到目标会话，更新它的消息
+                        const updatedMessages = [...targetConversation.messages, {
+                          id: aiMessageId,
+                          content: aiResponse,
+                          role: "assistant" as const,
+                          timestamp: new Date(),
+                          type: "answer" as const
+                        }];
+                        
+                        targetConversation.messages = updatedMessages;
                       }
-                    ]);
+                      
+                      return updatedConversations;
+                    });
+                    
+                    // 如果当前正在查看相同的会话，也更新当前显示的消息
+                    if (currentConversationId === activeConversationId) {
+                      setMessages(prev => [
+                        ...prev,
+                        {
+                          id: aiMessageId,
+                          content: aiResponse,
+                          role: "assistant" as const,
+                          timestamp: new Date(),
+                          type: "answer"
+                        }
+                      ]);
+                    }
                   } else {
                     // 已经有回答消息，更新它
                     aiResponse += content;
-                    setMessages(prev => {
-                      return prev.map(msg => {
-                        if (msg.id === aiMessageId) {
-                          return {
-                            ...msg,
-                            content: aiResponse
-                          };
-                        }
-                        return msg;
-                      });
+                    
+                    // 更新会话中的消息
+                    setConversations(prev => {
+                      const updatedConversations = [...prev];
+                      const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+                      
+                      if (targetConversation) {
+                        // 如果找到目标会话，更新对应的消息
+                        targetConversation.messages = targetConversation.messages.map(msg => {
+                          if (msg.id === aiMessageId) {
+                            return {
+                              ...msg,
+                              content: aiResponse
+                            };
+                          }
+                          return msg;
+                        });
+                      }
+                      
+                      return updatedConversations;
                     });
+                    
+                    // 如果当前正在查看相同的会话，也更新当前显示的消息
+                    if (currentConversationId === activeConversationId) {
+                      setMessages(prev => {
+                        return prev.map(msg => {
+                          if (msg.id === aiMessageId) {
+                            return {
+                              ...msg,
+                              content: aiResponse
+                            };
+                          }
+                          return msg;
+                        });
+                      });
+                    }
                   }
                 }
               }
@@ -218,14 +393,38 @@ export default function Home() {
       }
     } catch (error) {
       console.error("Error sending message:", error);
-      setIsLoading(false);
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        content: "抱歉，发生了错误，请稍后重试。",
-        role: "assistant",
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, errorMessage]);
+      // 如果不是用户主动中止请求导致的错误，才显示错误消息
+      if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        if (pendingConversationId === activeConversationId) {
+          setPendingConversationId(null);
+          setIsLoading(false);
+          setIsRequestPending(false);
+        }
+        
+        const errorMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          content: "抱歉，发生了错误，请稍后重试。",
+          role: "assistant" as const,
+          timestamp: new Date(),
+        };
+        
+        // 更新对应会话的消息
+        setConversations(prev => {
+          const updatedConversations = [...prev];
+          const targetConversation = updatedConversations.find(conv => conv.id === activeConversationId);
+          
+          if (targetConversation) {
+            targetConversation.messages = [...targetConversation.messages, errorMessage];
+          }
+          
+          return updatedConversations;
+        });
+        
+        // 如果当前正在查看相同的会话，也更新当前显示的消息
+        if (currentConversationId === activeConversationId) {
+          setMessages((prev) => [...prev, errorMessage]);
+        }
+      }
     }
   };
 
@@ -246,26 +445,11 @@ export default function Home() {
   };
 
   const startNewChat = async () => {
-    // 如果当前有消息，保存为历史会话
-    if (messages.length > 0) {
-      // 检查当前会话是否已经存在于历史记录中
-      const isExistingConversation = conversations.some(
-        conv => conv.id === currentConversationId
-      );
-
-      // 只有当不是已存在的会话时才保存
-      if (!isExistingConversation) {
-        const newConversation: Conversation = {
-          id: Date.now().toString(),
-          title: messages[0].content.slice(0, 30) + (messages[0].content.length > 30 ? '...' : ''),
-          messages: [...messages],
-          model: selectedModel,
-        };
-        
-        // 使用函数式更新确保状态更新的正确性，新对话添加到数组开头
-        setConversations(prev => [newConversation, ...prev]);
-      }
-    }
+    // 取消正在进行的请求
+    cancelOngoingRequest();
+    
+    // 保存当前对话到历史记录
+    saveCurrentConversation();
     
     // 清空当前消息列表
     setMessages([]);
@@ -278,18 +462,38 @@ export default function Home() {
     }, 300);
   };
 
-  const loadConversation = (conversation: Conversation) => {
-    // 如果当前有未保存的消息，先保存当前会话
-    if (messages.length > 0 && !currentConversationId) {
-      const newConversation: Conversation = {
-        id: Date.now().toString(),
-        title: messages[0].content.slice(0, 30) + (messages[0].content.length > 30 ? '...' : ''),
-        messages: [...messages],
-        model: selectedModel,
-      };
-      // 新对话添加到数组开头
-      setConversations(prev => [newConversation, ...prev]);
+  // 保存当前对话到历史记录
+  const saveCurrentConversation = () => {
+    // 如果当前有消息，保存为历史会话
+    if (messages.length > 0) {
+      // 检查当前会话是否已经存在于历史记录中
+      if (currentConversationId) {
+        // 更新现有对话
+        setConversations(prev => 
+          prev.map(conv => 
+            conv.id === currentConversationId 
+              ? { ...conv, messages: messages, model: selectedModel }
+              : conv
+          )
+        );
+      } else {
+        // 创建新的对话记录
+        const newConversation: Conversation = {
+          id: Date.now().toString(),
+          title: messages[0].content.slice(0, 30) + (messages[0].content.length > 30 ? '...' : ''),
+          messages: [...messages],
+          model: selectedModel,
+        };
+        
+        // 新对话添加到数组开头
+        setConversations(prev => [newConversation, ...prev]);
+      }
     }
+  };
+
+  const loadConversation = (conversation: Conversation) => {
+    // 保存当前对话到历史记录
+    saveCurrentConversation();
 
     // 加载选中的会话
     setMessages(conversation.messages);
@@ -298,17 +502,11 @@ export default function Home() {
   };
 
   const clearChat = () => {
-    // 如果当前有未保存的消息，先保存当前会话
-    if (messages.length > 0 && !currentConversationId) {
-      const newConversation: Conversation = {
-        id: Date.now().toString(),
-        title: messages[0].content.slice(0, 30) + (messages[0].content.length > 30 ? '...' : ''),
-        messages: [...messages],
-        model: selectedModel,
-      };
-      // 新对话添加到数组开头
-      setConversations(prev => [newConversation, ...prev]);
-    }
+    // 取消正在进行的请求
+    cancelOngoingRequest();
+    
+    // 保存当前对话到历史记录
+    saveCurrentConversation();
     
     setMessages([]);
     setCurrentConversationId(null);
@@ -326,6 +524,8 @@ export default function Home() {
     if (currentConversationId === conversationId) {
       setMessages([]);
       setCurrentConversationId(null);
+      // 取消正在进行的请求
+      cancelOngoingRequest();
     }
   };
 
@@ -338,6 +538,110 @@ export default function Home() {
   const toggleTheme = () => {
     setTheme(theme === 'dark' ? 'light' : 'dark');
   };
+
+  // 添加重命名对话功能
+  const renameConversation = (conversationId: string, newTitle: string) => {
+    setConversations(prev => prev.map(conv => 
+      conv.id === conversationId 
+        ? { ...conv, title: newTitle, isEditing: false }
+        : conv
+    ));
+  };
+
+  // 添加导出对话功能
+  const exportConversation = (conversation: Conversation) => {
+    // 创建Markdown格式的对话内容
+    const markdownContent = conversation.messages.map(msg => {
+      const role = msg.role === 'user' ? '用户' : 'AI';
+      return `## ${role}\n\n${msg.content}\n`;
+    }).join('\n');
+
+    // 创建JSON格式的对话内容
+    const jsonContent = JSON.stringify(conversation, null, 2);
+
+    // 创建Blob对象
+    const markdownBlob = new Blob([markdownContent], { type: 'text/markdown' });
+    const jsonBlob = new Blob([jsonContent], { type: 'application/json' });
+
+    // 创建下载链接
+    const markdownUrl = URL.createObjectURL(markdownBlob);
+    const jsonUrl = URL.createObjectURL(jsonBlob);
+
+    // 创建并触发下载
+    const markdownLink = document.createElement('a');
+    markdownLink.href = markdownUrl;
+    markdownLink.download = `${conversation.title}.md`;
+    markdownLink.click();
+
+    const jsonLink = document.createElement('a');
+    jsonLink.href = jsonUrl;
+    jsonLink.download = `${conversation.title}.json`;
+    jsonLink.click();
+
+    // 清理URL对象
+    URL.revokeObjectURL(markdownUrl);
+    URL.revokeObjectURL(jsonUrl);
+  };
+
+  // 切换思维链的展开/收起状态
+  const toggleReasoningCollapse = (messageId: string) => {
+    setCollapsedReasonings(prev => ({
+      ...prev,
+      [messageId]: !prev[messageId]
+    }));
+
+    // 重置展开全部的状态
+    if (!collapsedReasonings[messageId]) {
+      setExpandedReasonings(prev => ({
+        ...prev,
+        [messageId]: false
+      }));
+    }
+  };
+
+  // 双击切换思维链的展开全部/收起状态
+  const toggleReasoningExpand = (messageId: string, e: React.MouseEvent) => {
+    // 阻止事件冒泡，避免触发收起
+    e.stopPropagation();
+    
+    setExpandedReasonings(prev => ({
+      ...prev,
+      [messageId]: !prev[messageId]
+    }));
+
+    // 确保在触发展开时，取消折叠状态
+    if (collapsedReasonings[messageId]) {
+      setCollapsedReasonings(prev => ({
+        ...prev,
+        [messageId]: false
+      }));
+    }
+  };
+
+  // 定期保存当前对话状态
+  useEffect(() => {
+    // 如果有当前会话ID，定期更新该会话的内容
+    if (currentConversationId && messages.length > 0) {
+      const saveTimer = setTimeout(() => {
+        setConversations(prev => 
+          prev.map(conv => 
+            conv.id === currentConversationId 
+              ? { ...conv, messages: messages, model: selectedModel }
+              : conv
+          )
+        );
+      }, 2000); // 2秒后保存，避免频繁更新
+      
+      return () => clearTimeout(saveTimer);
+    }
+  }, [messages, currentConversationId, selectedModel]);
+
+  // 组件卸载时，确保请求被取消
+  useEffect(() => {
+    return () => {
+      cancelOngoingRequest();
+    };
+  }, []);
 
   return (
     <div className="flex h-screen bg-gray-50 dark:bg-gray-900">
@@ -467,24 +771,67 @@ export default function Home() {
                       currentConversationId === conversation.id ? 'bg-gray-200 dark:bg-gray-700 font-medium' : ''
                     }`}
                   >
-                    <button
-                      onClick={() => loadConversation(conversation)}
-                      className="w-full text-left dark:text-white text-sm truncate"
-                    >
-                      <div className="flex items-center">
-                        <svg className="w-3 h-3 mr-1 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path>
-                        </svg>
-                        <span className="truncate">{conversation.title}</span>
+                    {conversation.isEditing ? (
+                      <input
+                        type="text"
+                        defaultValue={conversation.title}
+                        className="w-full p-1 text-sm border rounded dark:bg-gray-600 dark:border-gray-500 dark:text-white"
+                        onBlur={(e) => renameConversation(conversation.id, e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            renameConversation(conversation.id, e.currentTarget.value);
+                          }
+                        }}
+                        autoFocus
+                      />
+                    ) : (
+                      <div className="flex items-center justify-between">
+                        <button
+                          onClick={() => loadConversation(conversation)}
+                          className="flex-1 text-left dark:text-white text-sm truncate"
+                        >
+                          <div className="flex items-center">
+                            <svg className="w-3 h-3 mr-1 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path>
+                            </svg>
+                            <span className="truncate">{conversation.title}</span>
+                          </div>
+                        </button>
+                        <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConversations(prev => prev.map(conv => 
+                                conv.id === conversation.id 
+                                  ? { ...conv, isEditing: true }
+                                  : conv
+                              ));
+                            }}
+                            className="p-1 rounded-full hover:bg-gray-300 dark:hover:bg-gray-600"
+                            title="重命名"
+                          >
+                            <Pencil size={14} className="text-gray-500 dark:text-gray-400" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              exportConversation(conversation);
+                            }}
+                            className="p-1 rounded-full hover:bg-gray-300 dark:hover:bg-gray-600"
+                            title="导出对话"
+                          >
+                            <Download size={14} className="text-gray-500 dark:text-gray-400" />
+                          </button>
+                          <button
+                            onClick={(e) => deleteConversation(e, conversation.id)}
+                            className="p-1 rounded-full hover:bg-gray-300 dark:hover:bg-gray-600"
+                            title="删除对话"
+                          >
+                            <X size={14} className="text-gray-500 dark:text-gray-400" />
+                          </button>
+                        </div>
                       </div>
-                    </button>
-                    <button
-                      onClick={(e) => deleteConversation(e, conversation.id)}
-                      className="absolute right-2 top-1/2 transform -translate-y-1/2 opacity-0 group-hover:opacity-100 p-1 rounded-full hover:bg-gray-300 dark:hover:bg-gray-600 transition-opacity duration-200"
-                      title="删除对话"
-                    >
-                      <X size={14} className="text-gray-500 dark:text-gray-400" />
-                    </button>
+                    )}
                   </div>
                 ))
               )}
@@ -522,43 +869,80 @@ export default function Home() {
               <p className="text-lg">开始一个新的对话吧！</p>
             </div>
           ) : (
-            messages.map((message) => (
+            messages.map((message, index) => (
               <div
                 key={message.id}
-                className={`flex ${
-                  message.role === "user" ? "justify-end" : "justify-start"
-                }`}
+                className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
                 <div
-                  className={`max-w-3/4 rounded-lg p-3 ${
-                    message.role === "user"
-                      ? "bg-blue-500 text-white"
-                      : message.type === "reasoning"
-                        ? "bg-yellow-100 dark:bg-yellow-900 dark:text-yellow-100 border border-yellow-300 dark:border-yellow-600"
-                        : "bg-gray-200 dark:bg-gray-700 dark:text-white"
-                  }`}
+                  className={`max-w-[80%] rounded-lg p-3 ${
+                    message.role === 'user'
+                      ? 'bg-blue-500 text-white'
+                      : message.type === 'reasoning'
+                        ? 'bg-yellow-100 dark:bg-yellow-900 dark:text-yellow-100 border border-yellow-300 dark:border-yellow-600'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white'
+                  } animate-fade-in`}
                 >
-                  {message.type === "reasoning" && (
-                    <div className="text-xs text-yellow-700 dark:text-yellow-300 mb-1 font-semibold flex items-center">
-                      <svg className="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd"></path>
-                      </svg>
-                      AI思考过程
+                  {message.type === 'reasoning' ? (
+                    <div className="w-full">
+                      <div 
+                        className="text-xs text-yellow-700 dark:text-yellow-300 mb-1 font-semibold flex items-center justify-between cursor-pointer p-1 reasoning-header"
+                        onClick={() => toggleReasoningCollapse(message.id)}
+                        title={collapsedReasonings[message.id] ? "展开思考过程" : "收起思考过程"}
+                      >
+                        <div className="flex items-center">
+                          <svg className="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd"></path>
+                          </svg>
+                          AI思考过程
+                        </div>
+                        <div className="flex items-center gap-1">
+                          {!collapsedReasonings[message.id] && (
+                            <span className="text-xs opacity-60 hidden sm:inline">(双击展开全部)</span>
+                          )}
+                          {collapsedReasonings[message.id] ? 
+                            <ChevronRight size={14} className="text-yellow-700 dark:text-yellow-300" /> : 
+                            <ChevronDown size={14} className="text-yellow-700 dark:text-yellow-300" />
+                          }
+                        </div>
+                      </div>
+                      <div 
+                        className={`border-t border-yellow-200 dark:border-yellow-800 pt-2 mt-1 whitespace-pre-wrap text-sm font-mono reasoning-container overflow-x-auto ${
+                          collapsedReasonings[message.id] 
+                            ? 'collapsed' 
+                            : expandedReasonings[message.id]
+                              ? 'reasoning-expanded max-h-[500px] overflow-y-auto' 
+                              : 'max-h-36 overflow-y-auto'
+                        }`}
+                        ref={(el) => {
+                          if (el) {
+                            reasoningContentRefs.current[message.id] = el;
+                            if (!collapsedReasonings[message.id]) {
+                              el.scrollTop = el.scrollHeight;
+                            }
+                          }
+                        }}
+                        onDoubleClick={(e) => toggleReasoningExpand(message.id, e)}
+                        title="双击切换展开/收起全部内容"
+                      >
+                        {message.content.replace("思考过程：", "")}
+                      </div>
                     </div>
+                  ) : (
+                    <div className="whitespace-pre-wrap">{message.content}</div>
                   )}
-                  <p className={message.type === "reasoning" ? "whitespace-pre-wrap text-sm font-mono" : ""}>
-                    {message.type === "reasoning" 
-                      ? message.content.replace("思考过程：", "") 
-                      : message.content}
-                  </p>
                 </div>
               </div>
             ))
           )}
           {isLoading && (
-            <div className="flex justify-start">
-              <div className="bg-gray-200 dark:bg-gray-700 rounded-lg p-3 max-w-3/4 dark:text-white">
-                <p>AI思考中...</p>
+            <div className="flex justify-start animate-fade-in">
+              <div className="bg-gray-100 dark:bg-gray-700 rounded-lg p-3">
+                <div className="flex space-x-2">
+                  <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
+                  <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce delay-100"></div>
+                  <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce delay-200"></div>
+                </div>
               </div>
             </div>
           )}
@@ -573,18 +957,26 @@ export default function Home() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyPress={(e) => e.key === "Enter" && handleSendMessage()}
-              placeholder="输入消息..."
+              placeholder={pendingConversationId ? "正在等待回复，请稍候..." : "输入消息..."}
               className="flex-1 p-2 border rounded-md dark:bg-gray-700 dark:border-gray-600 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-              disabled={isLoading || !confirmedApiKey}
+              disabled={pendingConversationId !== null || !confirmedApiKey}
             />
             <button
               onClick={handleSendMessage}
-              disabled={isLoading || input.trim() === "" || !confirmedApiKey}
+              disabled={pendingConversationId !== null || input.trim() === "" || !confirmedApiKey}
               className="p-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             >
               <Send size={20} />
             </button>
           </div>
+          {pendingConversationId && pendingConversationId !== currentConversationId && (
+            <div className="mt-2 text-xs text-amber-600 dark:text-amber-400 flex items-center">
+              <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+              </svg>
+              正在另一个对话中等待AI回复，在回复完成前无法发送新消息
+            </div>
+          )}
         </div>
       </div>
     </div>

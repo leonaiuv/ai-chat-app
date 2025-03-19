@@ -75,6 +75,9 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
+  --foreground-rgb: 0, 0, 0;
+  --background-start-rgb: 214, 219, 220;
+  --background-end-rgb: 255, 255, 255;
 }
 
 .dark {
@@ -118,4 +121,171 @@
   body {
     @apply bg-background text-foreground;
   }
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --foreground-rgb: 255, 255, 255;
+    --background-start-rgb: 0, 0, 0;
+    --background-end-rgb: 0, 0, 0;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+/* 添加消息动画延迟 */
+.messages-container > div:nth-child(1) { animation-delay: 0.1s; }
+.messages-container > div:nth-child(2) { animation-delay: 0.2s; }
+.messages-container > div:nth-child(3) { animation-delay: 0.3s; }
+.messages-container > div:nth-child(4) { animation-delay: 0.4s; }
+.messages-container > div:nth-child(5) { animation-delay: 0.5s; }
+.messages-container > div:nth-child(n+6) { animation-delay: 0.6s; }
+
+/* 自定义滚动条样式 */
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #CBD5E0 #EDF2F7;
+}
+
+/* Chrome/Edge/Safari */
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: #CBD5E0;
+  border-radius: 3px;
+}
+
+/* 深色模式滚动条 */
+.dark *::-webkit-scrollbar-thumb {
+  background-color: #4A5568;
+}
+
+.dark * {
+  scrollbar-color: #4A5568 #1A202C;
+}
+
+/* 思维链容器滚动条 */
+.reasoning-container::-webkit-scrollbar-thumb {
+  background-color: #F6E05E;
+}
+
+.dark .reasoning-container::-webkit-scrollbar-thumb {
+  background-color: #744210;
+}
+
+/* 思维链容器样式 */
+.reasoning-container {
+  scrollbar-width: thin;
+  scrollbar-color: #fbbf24 #fef3c7;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+  position: relative;
+  transition: all 0.3s ease-in-out;
+  max-width: 100%;
+  word-wrap: break-word;
+  word-break: break-all;
+}
+
+.reasoning-container::-webkit-scrollbar {
+  width: 6px;
+}
+
+.reasoning-container::-webkit-scrollbar-track {
+  background: #fef3c7;
+  border-radius: 3px;
+}
+
+.reasoning-container::-webkit-scrollbar-thumb {
+  background-color: #fbbf24;
+  border-radius: 3px;
+}
+
+.reasoning-container::-webkit-scrollbar-thumb:hover {
+  background-color: #f59e0b;
+}
+
+.dark .reasoning-container {
+  scrollbar-color: #92400e #78350f;
+}
+
+.dark .reasoning-container::-webkit-scrollbar-track {
+  background: #78350f;
+}
+
+.dark .reasoning-container::-webkit-scrollbar-thumb {
+  background-color: #92400e;
+}
+
+.dark .reasoning-container::-webkit-scrollbar-thumb:hover {
+  background-color: #b45309;
+}
+
+/* 思维链容器展开/收起动画 */
+@keyframes expandReasoning {
+  from {
+    max-height: 144px;
+  }
+  to {
+    max-height: 500px;
+  }
+}
+
+@keyframes collapseReasoning {
+  from {
+    max-height: 500px;
+  }
+  to {
+    max-height: 144px;
+  }
+}
+
+.reasoning-expanded {
+  animation: expandReasoning 0.3s ease-in-out forwards;
+}
+
+.reasoning-container.collapsed {
+  max-height: 0 !important;
+  padding-top: 0 !important;
+  margin-top: 0 !important;
+  border-top: none !important;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 思维链头部样式 */
+.reasoning-header {
+  transition: background-color 0.2s ease-in-out;
+}
+
+.reasoning-header:hover {
+  background-color: rgba(251, 191, 36, 0.1);
+}
+
+.dark .reasoning-header:hover {
+  background-color: rgba(146, 64, 14, 0.1);
 }
