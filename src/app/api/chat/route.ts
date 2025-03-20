@@ -97,7 +97,7 @@ export async function POST(request: Request) {
         headers,
         body,
         // 设置超时
-        signal: AbortSignal.timeout(1200000), // 20分钟超时
+        signal: AbortSignal.timeout(180000), // 3分钟超时
       };
 
       // 记录API调用开始
